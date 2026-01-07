@@ -1,0 +1,30 @@
+From a06fdac0bf3725df2b492cc55a8d3c5ff978e71e Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 06:20:42 +0000
+Subject: [PATCH] feat: Squash PR #16625 changes
+
+---
+ .github/CI_PERMISSIONS.json | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/.github/CI_PERMISSIONS.json b/.github/CI_PERMISSIONS.json
+index e65629a19..38b7c95ee 100644
+--- a/.github/CI_PERMISSIONS.json
++++ b/.github/CI_PERMISSIONS.json
+@@ -818,6 +818,13 @@
+         "reason": "custom override",
+         "can_rerun_stage": true
+     },
++    "sufeng-buaa": {
++        "can_tag_run_ci_label": true,
++        "can_rerun_failed_ci": true,
++        "cooldown_interval_minutes": 0,
++        "reason": "custom override",
++        "can_rerun_stage": true
++    },
+     "sundar24295s": {
+         "can_tag_run_ci_label": true,
+         "can_rerun_failed_ci": true,
+-- 
+2.52.0
+

@@ -1,0 +1,27 @@
+From 3676423a1f95003ef0b230ec60947bba2c4c5551 Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 06:20:46 +0000
+Subject: [PATCH] feat: Squash PR #16623 changes
+
+---
+ python/sglang/srt/entrypoints/openai/encoding_dsv32.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/python/sglang/srt/entrypoints/openai/encoding_dsv32.py b/python/sglang/srt/entrypoints/openai/encoding_dsv32.py
+index 8840173cb..6c8af565b 100644
+--- a/python/sglang/srt/entrypoints/openai/encoding_dsv32.py
++++ b/python/sglang/srt/entrypoints/openai/encoding_dsv32.py
+@@ -327,6 +327,10 @@ def encode_messages(
+             idx + len(context), full_messages, thinking_mode=thinking_mode
+         )
+ 
++    if not full_messages or full_messages[-1]["role"] not in ("user", "developer"):
++        prompt += "<｜Assistant｜>"
++        prompt += thinking_start_token if thinking_mode == "thinking" else thinking_end_token
++    
+     return prompt
+ 
+ 
+-- 
+2.52.0
+
