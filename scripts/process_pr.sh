@@ -51,7 +51,26 @@ fi
 # Soft reset to squash
 git reset --soft $MERGE_BASE
 
-git commit -m "feat: Squash PR #${PR_ID} changes"
+# Prepare commit message with metadata
+COMMIT_MSG="feat: Squash PR #${PR_ID} changes"
+
+if [ -n "$PR_AUTHOR" ]; then
+    COMMIT_MSG="${COMMIT_MSG}
+
+PR Author: ${PR_AUTHOR}"
+fi
+
+if [ -n "$PR_UPDATED_AT" ]; then
+    COMMIT_MSG="${COMMIT_MSG}
+PR Last Updated: ${PR_UPDATED_AT}"
+fi
+
+if [ -n "$PR_HEAD_SHA" ]; then
+    COMMIT_MSG="${COMMIT_MSG}
+Original-Commit-Hash: ${PR_HEAD_SHA}"
+fi
+
+git commit -m "$COMMIT_MSG"
 
 mkdir -p "${CURRENT_DIR}/${OUTPUT_DIR}"
 
