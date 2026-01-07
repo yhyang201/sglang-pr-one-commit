@@ -1,0 +1,25 @@
+From e07fdc286f98eecc53182d610207b75c3a17b43b Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:50:21 +0000
+Subject: [PATCH] feat: Squash PR #16591 changes
+
+---
+ sgl-model-gateway/src/mcp/manager.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sgl-model-gateway/src/mcp/manager.rs b/sgl-model-gateway/src/mcp/manager.rs
+index 802fcf4bf..dd1bf1912 100644
+--- a/sgl-model-gateway/src/mcp/manager.rs
++++ b/sgl-model-gateway/src/mcp/manager.rs
+@@ -87,7 +87,7 @@ impl McpManager {
+         }
+ 
+         if static_clients.is_empty() {
+-            warn!("No static MCP servers connected");
++            info!("No static MCP servers connected");
+         }
+ 
+         Ok(Self {
+-- 
+2.52.0
+

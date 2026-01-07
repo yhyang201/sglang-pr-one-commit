@@ -1,0 +1,1722 @@
+From 6de04dc31c4dce50a652d89f4369a60e6ca8fb44 Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:51:03 +0000
+Subject: [PATCH] feat: Squash PR #16580 changes
+
+---
+ .../grpc/harmony/stages/preparation.rs        |   4 +
+ .../grpc/regular/stages/chat/preparation.rs   |  10 +-
+ sgl-model-gateway/src/routers/grpc/utils.rs   | 116 +---
+ .../src/tool_parser/constraints.rs            | 216 ++++++
+ sgl-model-gateway/src/tool_parser/mod.rs      |   1 +
+ .../src/tool_parser/parsers/deepseek.rs       |  55 +-
+ .../src/tool_parser/parsers/glm4_moe.rs       |   7 +
+ .../src/tool_parser/parsers/json.rs           |   7 +
+ .../src/tool_parser/parsers/kimik2.rs         |   7 +
+ .../src/tool_parser/parsers/llama.rs          |   7 +
+ .../src/tool_parser/parsers/minimax_m2.rs     |   7 +
+ .../src/tool_parser/parsers/mistral.rs        |   7 +
+ .../src/tool_parser/parsers/passthrough.rs    |   8 +-
+ .../src/tool_parser/parsers/pythonic.rs       |   9 +
+ .../src/tool_parser/parsers/qwen.rs           |   7 +
+ .../src/tool_parser/parsers/step3.rs          |   5 +
+ sgl-model-gateway/src/tool_parser/traits.rs   |  62 ++
+ sgl-model-gateway/tests/tool_parser/mod.rs    |   2 +
+ .../tests/tool_parser/test_constraints.rs     | 627 ++++++++++++++++++
+ .../tests/tool_parser/test_structural_tag.rs  | 300 +++++++++
+ 20 files changed, 1343 insertions(+), 121 deletions(-)
+ create mode 100644 sgl-model-gateway/src/tool_parser/constraints.rs
+ create mode 100644 sgl-model-gateway/tests/tool_parser/test_constraints.rs
+ create mode 100644 sgl-model-gateway/tests/tool_parser/test_structural_tag.rs
+
+diff --git a/sgl-model-gateway/src/routers/grpc/harmony/stages/preparation.rs b/sgl-model-gateway/src/routers/grpc/harmony/stages/preparation.rs
+index 0882db3c1..20e3cfb3d 100644
+--- a/sgl-model-gateway/src/routers/grpc/harmony/stages/preparation.rs
++++ b/sgl-model-gateway/src/routers/grpc/harmony/stages/preparation.rs
+@@ -274,6 +274,10 @@ impl HarmonyPreparationStage {
+                 let tag = Self::build_tool_call_structural_tag(tools, Some(&function.name))?;
+                 Ok(Some(("structural_tag".to_string(), tag)))
+             }
++            ToolChoice::Value(ToolChoiceValue::Auto) => {
++                let tag = Self::build_tool_call_structural_tag(tools, None)?;
++                Ok(Some(("structural_tag".to_string(), tag)))
++            }
+             ToolChoice::Value(ToolChoiceValue::Required) => {
+                 let tag = Self::build_tool_call_structural_tag(tools, None)?;
+                 Ok(Some(("structural_tag".to_string(), tag)))
+diff --git a/sgl-model-gateway/src/routers/grpc/regular/stages/chat/preparation.rs b/sgl-model-gateway/src/routers/grpc/regular/stages/chat/preparation.rs
+index e345df356..c9fca16e1 100644
+--- a/sgl-model-gateway/src/routers/grpc/regular/stages/chat/preparation.rs
++++ b/sgl-model-gateway/src/routers/grpc/regular/stages/chat/preparation.rs
+@@ -16,6 +16,7 @@ use crate::{
+             utils,
+         },
+     },
++    tool_parser::constraints,
+ };
+ 
+ /// Chat preparation stage
+@@ -75,7 +76,14 @@ impl ChatPreparationStage {
+ 
+         // Step 4: Build tool constraints if needed
+         let tool_call_constraint = if let Some(tools) = body_ref.tools.as_ref() {
+-            utils::generate_tool_constraints(tools, &request.tool_choice, &request.model)
++            constraints::build_tool_call_constraint(
++                tools,
++                &request.tool_choice,
++                request.parallel_tool_calls.unwrap_or(true),
++                &ctx.components.tool_parser_factory,
++                None,
++                &request.model,
++            )
+                 .map_err(|e| {
+                     error!(function = "ChatPreparationStage::execute", error = %e, "Invalid tool configuration");
+                     error::bad_request("invalid_tool_configuration", format!("Invalid tool configuration: {}", e))
+diff --git a/sgl-model-gateway/src/routers/grpc/utils.rs b/sgl-model-gateway/src/routers/grpc/utils.rs
+index 08cbec032..5dd9cd829 100644
+--- a/sgl-model-gateway/src/routers/grpc/utils.rs
++++ b/sgl-model-gateway/src/routers/grpc/utils.rs
+@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc};
+ 
+ use axum::response::Response;
+ use http::StatusCode;
+-use serde_json::{json, Map, Value};
++use serde_json::{json, Value};
+ use tracing::{error, warn};
+ use uuid::Uuid;
+ 
+@@ -227,120 +227,6 @@ fn transform_content_field(content_value: &mut Value, content_format: ChatTempla
+     }
+ }
+ 
+-/// Generate tool constraints for structured generation
+-/// Note: tools should already be filtered if needed (by allowed_tools or specific function)
+-pub(crate) fn generate_tool_constraints(
+-    tools: &[Tool],
+-    tool_choice: &Option<ToolChoice>,
+-    _model: &str,
+-) -> Result<Option<(String, String)>, String> {
+-    let Some(choice) = tool_choice.as_ref() else {
+-        return Ok(None);
+-    };
+-
+-    match choice {
+-        // Specific function: Return parameters schema directly
+-        // tools should already be filtered to contain only the specific function
+-        ToolChoice::Function { .. } => {
+-            if tools.is_empty() {
+-                return Ok(None);
+-            }
+-            let tool = &tools[0];
+-
+-            // Return the tool's parameters schema directly (not wrapped in array)
+-            let params_schema = serde_json::to_string(&tool.function.parameters)
+-                .map_err(|e| format!("Failed to serialize tool parameters: {}", e))?;
+-            Ok(Some((String::from("json_schema"), params_schema)))
+-        }
+-
+-        // Required: Array of tool calls with minItems: 1
+-        ToolChoice::Value(ToolChoiceValue::Required) => {
+-            let schema = build_required_array_schema(tools)?;
+-            Ok(Some(("json_schema".to_string(), schema)))
+-        }
+-
+-        // AllowedTools with required mode: tools are already filtered
+-        ToolChoice::AllowedTools { mode, .. } => {
+-            if mode == "required" {
+-                if tools.is_empty() {
+-                    return Ok(None);
+-                }
+-                let schema = build_required_array_schema(tools)?;
+-                Ok(Some(("json_schema".to_string(), schema)))
+-            } else {
+-                // "auto" mode - no constraint needed
+-                Ok(None)
+-            }
+-        }
+-
+-        // "auto" or "none" - no constraint
+-        _ => Ok(None),
+-    }
+-}
+-
+-/// Build JSON schema for required tool calls (array with minItems: 1)
+-/// Includes $defs consolidation from all tools (matching Python's behavior)
+-fn build_required_array_schema(tools: &[Tool]) -> Result<String, String> {
+-    let mut any_of_schemas = Vec::with_capacity(tools.len());
+-    for tool in tools {
+-        let tool_schema = json!({
+-            "properties": {
+-                "name": {
+-                    "type": "string",
+-                    "enum": [tool.function.name]
+-                },
+-                "parameters": tool.function.parameters
+-            },
+-            "required": ["name", "parameters"]
+-        });
+-        any_of_schemas.push(tool_schema);
+-    }
+-
+-    // Consolidate $defs from all tools (matching Python's _get_tool_schema_defs)
+-    let mut all_defs: Map<String, Value> = Map::new();
+-    for tool in tools {
+-        if let Value::Object(params) = &tool.function.parameters {
+-            if let Some(Value::Object(defs)) = params.get("$defs") {
+-                for (def_name, def_schema) in defs {
+-                    if let Some(existing) = all_defs.get(def_name) {
+-                        // Check for conflicts
+-                        if existing != def_schema {
+-                            let error_msg = format!(
+-                                "Tool definition '{}' has multiple conflicting schemas, which is not supported",
+-                                def_name
+-                            );
+-                            error!("{}", error_msg);
+-                            return Err(error_msg);
+-                        }
+-                    } else {
+-                        all_defs.insert(def_name.clone(), def_schema.clone());
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    // Build the full array schema
+-    let mut array_schema = json!({
+-        "type": "array",
+-        "minItems": 1,
+-        "items": {
+-            "type": "object",
+-            "anyOf": any_of_schemas
+-        }
+-    });
+-
+-    // Add $defs if any were found (matching Python's behavior)
+-    if !all_defs.is_empty() {
+-        if let Value::Object(ref mut schema_obj) = array_schema {
+-            schema_obj.insert("$defs".to_string(), Value::Object(all_defs));
+-        }
+-    }
+-
+-    serde_json::to_string(&array_schema)
+-        .map_err(|e| format!("Failed to serialize tool schema: {}", e))
+-}
+-
+ /// Filter tools based on tool_choice (generic helper)
+ ///
+ /// Returns filtered tools if filtering is needed, otherwise returns None.
+diff --git a/sgl-model-gateway/src/tool_parser/constraints.rs b/sgl-model-gateway/src/tool_parser/constraints.rs
+new file mode 100644
+index 000000000..dc37b339a
+--- /dev/null
++++ b/sgl-model-gateway/src/tool_parser/constraints.rs
+@@ -0,0 +1,216 @@
++use crate::{
++    protocols::common::{Tool, ToolChoice, ToolChoiceValue},
++    tool_parser::{factory::ParserFactory, traits::ToolParser},
++};
++
++/// Build tool call constraint based on tool_choice and parallel_tool_calls.
++///
++/// This function follows the same pattern as get_tool_parser():
++/// - Respects user's explicit --tool-call-parser flag (configured_parser)
++/// - Falls back to auto-detection by model name
++///
++/// Strategy:
++/// - tool_choice="auto": Use structural_tag from parser (if available)
++/// - tool_choice="required": Use json_schema
++/// - tool_choice=specific function: Use json_schema
++///
++/// # Arguments
++/// * `tools` - Available tools
++/// * `tool_choice` - Tool choice mode
++/// * `parallel_tool_calls` - Whether to allow multiple tool calls
++/// * `tool_parser_factory` - Factory to get parser (from SharedComponents)
++/// * `configured_parser` - User's explicit --tool-call-parser choice (from processor's configured_tool_parser)
++/// * `model` - Model name for auto-detection fallback
++///
++/// # Returns
++/// Option<(constraint_type, constraint_value)>
++pub fn build_tool_call_constraint(
++    tools: &[Tool],
++    tool_choice: &Option<ToolChoice>,
++    parallel_tool_calls: bool,
++    tool_parser_factory: &ParserFactory,
++    configured_parser: Option<&String>,
++    model: &str,
++) -> Result<Option<(String, String)>, String> {
++    let Some(choice) = tool_choice.as_ref() else {
++        return Ok(None);
++    };
++
++    match choice {
++        ToolChoice::Value(ToolChoiceValue::Auto) => {
++            if tools.is_empty() {
++                return Ok(None);
++            }
++            let parser = get_tool_parser(tool_parser_factory, configured_parser, model);
++
++            let tag = parser.build_structural_tag(tools, false, !parallel_tool_calls)?;
++            Ok(Some(("structural_tag".to_string(), tag)))
++        }
++
++        ToolChoice::Value(ToolChoiceValue::Required) => {
++            if tools.is_empty() {
++                return Ok(None);
++            }
++            let schema = build_required_json_schema(tools, parallel_tool_calls)?;
++            Ok(Some(("json_schema".to_string(), schema)))
++        }
++
++        ToolChoice::Function {
++            tool_type: _,
++            function,
++        } => {
++            let target_tool = tools.iter().find(|t| t.function.name == function.name);
++            if let Some(tool) = target_tool {
++                let schema = build_specific_function_json_schema(tool, parallel_tool_calls)?;
++                Ok(Some(("json_schema".to_string(), schema)))
++            } else {
++                Ok(None)
++            }
++        }
++
++        ToolChoice::AllowedTools {
++            tool_type: _, mode, ..
++        } => {
++            if tools.is_empty() {
++                return Ok(None);
++            }
++            if mode == "required" {
++                let schema = build_required_json_schema(tools, parallel_tool_calls)?;
++                Ok(Some(("json_schema".to_string(), schema)))
++            } else {
++                let parser = get_tool_parser(tool_parser_factory, configured_parser, model);
++                let tag = parser.build_structural_tag(tools, false, !parallel_tool_calls)?;
++                Ok(Some(("structural_tag".to_string(), tag)))
++            }
++        }
++
++        _ => Ok(None),
++    }
++}
++
++/// Get a tool parser for given model, respecting configured_parser.
++fn get_tool_parser(
++    factory: &ParserFactory,
++    configured_parser: Option<&String>,
++    model: &str,
++) -> Box<dyn ToolParser> {
++    if let Some(parser_name) = configured_parser {
++        if let Some(parser) = factory.registry().create_parser(parser_name) {
++            return parser;
++        }
++    }
++
++    factory
++        .registry()
++        .create_for_model(model)
++        .unwrap_or_else(|| factory.registry().create_parser("json").unwrap())
++}
++
++/// Build JSON schema for required tool choice mode.
++/// Includes $defs consolidation from all tools (matching Python's behavior).
++fn build_required_json_schema(tools: &[Tool], parallel_tool_calls: bool) -> Result<String, String> {
++    let mut any_of_schemas = Vec::new();
++    let mut all_defs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
++
++    for tool in tools {
++        // Consolidate $defs from all tools (matching Python's _get_tool_schema_defs)
++        if let serde_json::Value::Object(params) = &tool.function.parameters {
++            if let Some(serde_json::Value::Object(defs)) = params.get("$defs") {
++                for (def_name, def_schema) in defs {
++                    if let Some(existing) = all_defs.get(def_name) {
++                        // Check for conflicts
++                        if existing != def_schema {
++                            let error_msg = format!(
++                                "Tool definition '{}' has multiple conflicting schemas, which is not supported",
++                                def_name
++                            );
++                            tracing::error!("{}", error_msg);
++                            return Err(error_msg);
++                        }
++                    } else {
++                        all_defs.insert(def_name.clone(), def_schema.clone());
++                    }
++                }
++            }
++        }
++
++        // Clone parameters and remove $defs to avoid duplication in schema
++        // since they are moved to the root level
++        let mut parameters = tool.function.parameters.clone();
++        if let serde_json::Value::Object(ref mut map) = parameters {
++            map.remove("$defs");
++        }
++
++        let tool_schema = serde_json::json!({
++            "properties": {
++                "name": {
++                    "type": "string",
++                    "enum": [tool.function.name]
++                },
++                "parameters": parameters
++            },
++            "required": ["name", "parameters"]
++        });
++        any_of_schemas.push(tool_schema);
++    }
++
++    let mut array_schema = serde_json::json!({
++        "type": "array",
++        "minItems": 1,
++        "items": {
++            "type": "object",
++            "anyOf": any_of_schemas
++        }
++    });
++
++    if !parallel_tool_calls {
++        array_schema["maxItems"] = serde_json::json!(1);
++    }
++
++    // Add $defs to root level if any were found (matching Python's behavior)
++    if !all_defs.is_empty() {
++        array_schema["$defs"] = serde_json::Value::Object(all_defs);
++    }
++
++    serde_json::to_string(&array_schema)
++        .map_err(|e| format!("Failed to serialize json schema: {}", e))
++}
++
++/// Build JSON schema for specific function choice.
++/// Includes $defs extraction from the tool's parameters (matching Python's behavior).
++fn build_specific_function_json_schema(
++    tool: &Tool,
++    _parallel_tool_calls: bool,
++) -> Result<String, String> {
++    let mut array_schema = serde_json::json!({
++        "type": "array",
++        "minItems": 1,
++        "maxItems": 1
++    });
++
++    // Extract $defs from tool parameters and add to root level (matching Python's behavior)
++    let mut parameters = tool.function.parameters.clone();
++    if let serde_json::Value::Object(ref mut params) = parameters {
++        if let Some(serde_json::Value::Object(defs)) = params.remove("$defs") {
++            if !defs.is_empty() {
++                array_schema["$defs"] = serde_json::Value::Object(defs);
++            }
++        }
++    }
++
++    let item_schema = serde_json::json!({
++        "properties": {
++            "name": {
++                "type": "string",
++                "enum": [tool.function.name]
++            },
++            "parameters": parameters
++        },
++        "required": ["name", "parameters"]
++    });
++
++    array_schema["items"] = item_schema;
++
++    serde_json::to_string(&array_schema)
++        .map_err(|e| format!("Failed to serialize json schema: {}", e))
++}
+diff --git a/sgl-model-gateway/src/tool_parser/mod.rs b/sgl-model-gateway/src/tool_parser/mod.rs
+index 227d7a6a5..caeb5f65a 100644
+--- a/sgl-model-gateway/src/tool_parser/mod.rs
++++ b/sgl-model-gateway/src/tool_parser/mod.rs
+@@ -2,6 +2,7 @@
+ ///
+ /// This module provides infrastructure for parsing tool calls from various model formats.
+ // Core modules
++pub mod constraints;
+ pub mod errors;
+ pub mod factory;
+ pub mod partial_json;
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/deepseek.rs b/sgl-model-gateway/src/tool_parser/parsers/deepseek.rs
+index d9b50f999..6bb33b0b0 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/deepseek.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/deepseek.rs
+@@ -1,6 +1,6 @@
+ use async_trait::async_trait;
+ use regex::Regex;
+-use serde_json::Value;
++use serde_json::{json, Value};
+ 
+ use crate::{
+     protocols::common::Tool,
+@@ -325,4 +325,57 @@ impl ToolParser for DeepSeekParser {
+         self.current_tool_name_sent = false;
+         self.streamed_args_for_tool.clear();
+     }
++
++    fn get_format_info(&self, tool_name: &str) -> (String, String, String) {
++        // Not used for structural tag (overridden), but needed for parsing
++        let begin = format!(r#"{{"name":"{}", "arguments":"#, tool_name);
++        let end = "\"}".to_string();
++        let trigger = "<｜tool▁calls▁begin｜>".to_string();
++        (begin, end, trigger)
++    }
++
++    fn build_structural_tag(
++        &self,
++        tools: &[Tool],
++        at_least_one: bool,
++        stop_after_first: bool,
++    ) -> Result<String, String> {
++        let mut tool_tags = Vec::new();
++
++        for tool in tools {
++            let schema = tool.function.parameters.clone();
++
++            tool_tags.push(json!({
++                "format": "tag",
++                "begin": "<｜tool▁call▁begin｜>\\n```jsonc\\n{",
++                "content": {
++                    "format": "json_schema",
++                    "schema": schema
++                },
++                "end": "}\\n```\\n<｜tool▁call▁end｜>"
++            }));
++        }
++
++        let structural_tag = json!({
++            "format": "triggered_tags",
++            "triggers": ["<｜tool▁calls▁begin｜>"],
++            "tags": [{
++                "format": "tag",
++                "begin": "<｜tool▁calls▁begin｜>\\n",
++                "content": {
++                    "format": "tags_with_separator",
++                    "tags": tool_tags,
++                    "separator": "\\n",
++                    "at_least_one": at_least_one,
++                    "stop_after_first": stop_after_first
++                },
++                "end": "\\n<｜tool▁calls▁end｜>"
++            }],
++            "at_least_one": false,
++            "stop_after_first": false
++        });
++
++        serde_json::to_string(&structural_tag)
++            .map_err(|e| format!("Failed to serialize structural tag: {}", e))
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/glm4_moe.rs b/sgl-model-gateway/src/tool_parser/parsers/glm4_moe.rs
+index e72b3b81c..639815c72 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/glm4_moe.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/glm4_moe.rs
+@@ -337,4 +337,11 @@ impl ToolParser for Glm4MoeParser {
+         self.current_tool_id = -1;
+         self.streamed_args_for_tool.clear();
+     }
++
++    fn get_format_info(&self, tool_name: &str) -> (String, String, String) {
++        let begin = format!(r#"{{"name":"{}", "arguments":"#, tool_name);
++        let end = "\"}".to_string();
++        let trigger = "<tool_call>".to_string();
++        (begin, end, trigger)
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/json.rs b/sgl-model-gateway/src/tool_parser/parsers/json.rs
+index 7c4be2f45..2df04942c 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/json.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/json.rs
+@@ -302,4 +302,11 @@ impl ToolParser for JsonParser {
+         self.is_array_format = false;
+         self.array_closed = false;
+     }
++
++    fn get_format_info(&self, tool_name: &str) -> (String, String, String) {
++        let begin = format!(r#"{{"name":"{}", "arguments":"#, tool_name);
++        let end = "\"}".to_string();
++        let trigger = "[TOOL_CALLS]".to_string();
++        (begin, end, trigger)
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/kimik2.rs b/sgl-model-gateway/src/tool_parser/parsers/kimik2.rs
+index 948788be3..b530c1e38 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/kimik2.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/kimik2.rs
+@@ -345,4 +345,11 @@ impl ToolParser for KimiK2Parser {
+         self.streamed_args_for_tool.clear();
+         self.last_arguments.clear();
+     }
++
++    fn get_format_info(&self, tool_name: &str) -> (String, String, String) {
++        let begin = format!(r#"{{"name":"{}", "arguments":"#, tool_name);
++        let end = "\"}".to_string();
++        let trigger = "<|tool_calls_section_begin|>".to_string();
++        (begin, end, trigger)
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/llama.rs b/sgl-model-gateway/src/tool_parser/parsers/llama.rs
+index 9d47414b3..2110c96e0 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/llama.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/llama.rs
+@@ -242,4 +242,11 @@ impl ToolParser for LlamaParser {
+             &mut self.streamed_args_for_tool,
+         );
+     }
++
++    fn get_format_info(&self, tool_name: &str) -> (String, String, String) {
++        let begin = format!(r#"{{"name":"{}", "arguments":"#, tool_name);
++        let end = "}".to_string();
++        let trigger = "<|python_tag|>".to_string();
++        (begin, end, trigger)
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/minimax_m2.rs b/sgl-model-gateway/src/tool_parser/parsers/minimax_m2.rs
+index 269085c6b..97116c279 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/minimax_m2.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/minimax_m2.rs
+@@ -546,4 +546,11 @@ impl ToolParser for MinimaxM2Parser {
+         self.function_name_sent = false;
+         self.waiting_for_tool_call_end = false;
+     }
++
++    fn get_format_info(&self, tool_name: &str) -> (String, String, String) {
++        let begin = format!(r#"{{"name":"{}", "arguments":"#, tool_name);
++        let end = "\"}".to_string();
++        let trigger = "<|tool_calls_section_begin|>".to_string();
++        (begin, end, trigger)
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/mistral.rs b/sgl-model-gateway/src/tool_parser/parsers/mistral.rs
+index 2b36ce15b..fdc32ce9b 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/mistral.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/mistral.rs
+@@ -284,4 +284,11 @@ impl ToolParser for MistralParser {
+         );
+         self.array_closed = false;
+     }
++
++    fn get_format_info(&self, _tool_name: &str) -> (String, String, String) {
++        let begin = "{\"name\": \"".to_string();
++        let end = "\"}".to_string();
++        let trigger = "[TOOL_CALLS]".to_string();
++        (begin, end, trigger)
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/passthrough.rs b/sgl-model-gateway/src/tool_parser/parsers/passthrough.rs
+index c6b438e9a..b64f5e732 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/passthrough.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/passthrough.rs
+@@ -11,7 +11,7 @@ use crate::{
+     tool_parser::{
+         errors::ParserResult,
+         traits::ToolParser,
+-        types::{StreamingParseResult, ToolCall, ToolCallItem},
++        types::{StreamingParseResult, ToolCall},
+     },
+ };
+ 
+@@ -28,7 +28,6 @@ impl PassthroughParser {
+ #[async_trait]
+ impl ToolParser for PassthroughParser {
+     async fn parse_complete(&self, output: &str) -> ParserResult<(String, Vec<ToolCall>)> {
+-        // Return text unchanged with no tool calls
+         Ok((output.to_string(), vec![]))
+     }
+ 
+@@ -49,7 +48,8 @@ impl ToolParser for PassthroughParser {
+         false
+     }
+ 
+-    fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallItem>> {
+-        None
++    fn get_format_info(&self, _tool_name: &str) -> (String, String, String) {
++        // Passthrough doesn't support structural tags - return empty markers
++        (String::new(), String::new(), String::new())
+     }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/pythonic.rs b/sgl-model-gateway/src/tool_parser/parsers/pythonic.rs
+index eb98dd30e..60bdd74dc 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/pythonic.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/pythonic.rs
+@@ -216,6 +216,15 @@ impl ToolParser for PythonicParser {
+ 
+         false
+     }
++
++    fn reset(&mut self) {
++        self.buffer.clear();
++    }
++
++    fn get_format_info(&self, _tool_name: &str) -> (String, String, String) {
++        // PythonicParser doesn't support structural tags - return empty markers
++        (String::new(), String::new(), String::new())
++    }
+ }
+ 
+ /// Find the matching closing bracket for the opening bracket at start position.
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/qwen.rs b/sgl-model-gateway/src/tool_parser/parsers/qwen.rs
+index 26b71ad14..de809a458 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/qwen.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/qwen.rs
+@@ -255,4 +255,11 @@ impl ToolParser for QwenParser {
+             &mut self.streamed_args_for_tool,
+         );
+     }
++
++    fn get_format_info(&self, _tool_name: &str) -> (String, String, String) {
++        let begin = "{\"name\": \"".to_string();
++        let end = "\"}".to_string();
++        let trigger = "<|tool_call|>".to_string();
++        (begin, end, trigger)
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/parsers/step3.rs b/sgl-model-gateway/src/tool_parser/parsers/step3.rs
+index e4beb4574..5773b3a21 100644
+--- a/sgl-model-gateway/src/tool_parser/parsers/step3.rs
++++ b/sgl-model-gateway/src/tool_parser/parsers/step3.rs
+@@ -573,4 +573,9 @@ impl ToolParser for Step3Parser {
+         self.in_tool_call = false;
+         self.function_name_sent = false;
+     }
++
++    fn get_format_info(&self, _tool_name: &str) -> (String, String, String) {
++        // Step3 uses custom XML format, not structural tag compatible
++        (String::new(), String::new(), String::new())
++    }
+ }
+diff --git a/sgl-model-gateway/src/tool_parser/traits.rs b/sgl-model-gateway/src/tool_parser/traits.rs
+index 51421f20f..ea87dca19 100644
+--- a/sgl-model-gateway/src/tool_parser/traits.rs
++++ b/sgl-model-gateway/src/tool_parser/traits.rs
+@@ -1,4 +1,5 @@
+ use async_trait::async_trait;
++use serde_json::json;
+ 
+ use crate::{
+     protocols::common::Tool,
+@@ -47,6 +48,67 @@ pub trait ToolParser: Send + Sync {
+     fn reset(&mut self) {
+         // Default no-op implementation
+     }
++
++    /// Build xgrammar structural tag for this parser's format.
++    ///
++    /// # Arguments
++    /// * `tools` - List of available tools
++    /// * `at_least_one` - Require at least one tool call (for tool_choice="required")
++    /// * `stop_after_first` - Stop after first tool call (for parallel_tool_calls=false)
++    ///
++    /// # Returns
++    /// JSON string of structural tag in xgrammar format
++    ///
++    /// # Default Implementation
++    /// Returns `triggered_tags` format using parser-specific begin/end/trigger patterns.
++    fn build_structural_tag(
++        &self,
++        tools: &[Tool],
++        at_least_one: bool,
++        stop_after_first: bool,
++    ) -> Result<String, String> {
++        let mut tags = Vec::new();
++        let mut triggers = std::collections::HashSet::new();
++
++        for tool in tools {
++            let name = &tool.function.name;
++
++            let (begin, end, trigger) = self.get_format_info(name);
++
++            let schema = tool.function.parameters.clone();
++
++            tags.push(json!({
++                "format": "tag",
++                "begin": begin,
++                "content": {
++                    "format": "json_schema",
++                    "schema": schema
++                },
++                "end": end
++            }));
++
++            triggers.insert(trigger);
++        }
++
++        let structural_tag = json!({
++            "format": "triggered_tags",
++            "triggers": triggers.into_iter().collect::<Vec<_>>(),
++            "tags": tags,
++            "at_least_one": at_least_one,
++            "stop_after_first": stop_after_first
++        });
++
++        serde_json::to_string(&structural_tag)
++            .map_err(|e| format!("Failed to serialize structural tag: {}", e))
++    }
++
++    /// Get format-specific begin/end/trigger patterns for a tool.
++    ///
++    /// # Returns
++    /// Tuple of (begin, end, trigger)
++    ///
++    /// This method must be implemented by each parser to provide model-specific formats.
++    fn get_format_info(&self, tool_name: &str) -> (String, String, String);
+ }
+ 
+ /// Trait for partial JSON parsing
+diff --git a/sgl-model-gateway/tests/tool_parser/mod.rs b/sgl-model-gateway/tests/tool_parser/mod.rs
+index 55d4082c8..58744c6f8 100644
+--- a/sgl-model-gateway/tests/tool_parser/mod.rs
++++ b/sgl-model-gateway/tests/tool_parser/mod.rs
+@@ -1,5 +1,7 @@
+ //! Tool parser integration tests
+ 
++pub mod test_constraints;
++pub mod test_structural_tag;
+ pub mod tool_parser_deepseek;
+ pub mod tool_parser_edge_cases;
+ pub mod tool_parser_fallback;
+diff --git a/sgl-model-gateway/tests/tool_parser/test_constraints.rs b/sgl-model-gateway/tests/tool_parser/test_constraints.rs
+new file mode 100644
+index 000000000..57bac5b42
+--- /dev/null
++++ b/sgl-model-gateway/tests/tool_parser/test_constraints.rs
+@@ -0,0 +1,627 @@
++//! Tests for constraint generation according to GitHub issue #13032
++//!
++//! Tests `constraints::build_tool_call_constraint()` with various tool_choice modes
++//! and parallel_tool_calls configurations
++
++use smg::protocols::common::{FunctionChoice, Tool, ToolChoice, ToolChoiceValue, ToolReference};
++use smg::tool_parser::{constraints, factory::ParserFactory};
++
++/// Helper to create test tools
++fn create_test_tools() -> Vec<Tool> {
++    vec![
++        Tool {
++            tool_type: "function".to_string(),
++            function: smg::protocols::common::Function {
++                name: "get_weather".to_string(),
++                description: Some("Get current weather".to_string()),
++                parameters: serde_json::json!({
++                    "type": "object",
++                    "properties": {
++                        "location": {"type": "string"},
++                        "units": {"type": "string", "enum": ["celsius", "fahrenheit"]}
++                    },
++                    "required": ["location"]
++                }),
++                strict: None,
++            },
++        },
++        Tool {
++            tool_type: "function".to_string(),
++            function: smg::protocols::common::Function {
++                name: "search".to_string(),
++                description: Some("Search the web".to_string()),
++                parameters: serde_json::json!({
++                    "type": "object",
++                    "properties": {
++                        "query": {"type": "string"}
++                    },
++                    "required": ["query"]
++                }),
++                strict: None,
++            },
++        },
++    ]
++}
++
++/// Helper to create tool with complex schema
++fn create_tool_with_defs() -> Tool {
++    Tool {
++        tool_type: "function".to_string(),
++        function: smg::protocols::common::Function {
++            name: "complex_tool".to_string(),
++            description: Some("Tool with $defs".to_string()),
++            parameters: serde_json::json!({
++                "type": "object",
++                "properties": {
++                    "item": {"$ref": "#/$defs/Item"}
++                },
++                "required": ["item"],
++                "$defs": {
++                    "Item": {
++                        "type": "object",
++                        "properties": {
++                            "name": {"type": "string"},
++                            "value": {"type": "number"}
++                        }
++                    }
++                }
++            }),
++            strict: None,
++        },
++    }
++}
++
++// ============================================================================
++// Auto mode tests - structural_tag generation
++// ============================================================================
++
++#[test]
++fn test_auto_mode_generates_structural_tag() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    assert_eq!(constraint.0, "structural_tag");
++
++    let tag_json: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    assert_eq!(tag_json["format"], "triggered_tags");
++}
++
++#[test]
++fn test_auto_mode_with_configured_parser() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++    let configured_parser = &"mistral".to_string();
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        Some(configured_parser),
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    assert_eq!(constraint.0, "structural_tag");
++
++    let tag_json: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    let triggers = tag_json["triggers"].as_array().unwrap();
++    assert!(triggers.iter().any(|t| t == "[TOOL_CALLS]"));
++}
++
++#[test]
++fn test_auto_mode_auto_detection() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "llama-3.2",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    assert_eq!(constraint.0, "structural_tag");
++
++    let tag_json: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    let triggers = tag_json["triggers"].as_array().unwrap();
++    assert!(triggers.iter().any(|t| t == "<|python_tag|>"));
++}
++
++// ============================================================================
++// Required mode tests - json_schema generation
++// ============================================================================
++
++#[test]
++fn test_required_mode_generates_json_schema() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Required));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    assert_eq!(constraint.0, "json_schema");
++
++    let schema: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    assert_eq!(schema["type"], "array");
++    assert_eq!(schema["minItems"], 1);
++    assert!(schema.get("maxItems").is_none());
++
++    let items = &schema["items"];
++    assert_eq!(items["type"], "object");
++    assert!(items["anyOf"].is_array());
++}
++
++#[test]
++fn test_required_mode_single_tool() {
++    let factory = ParserFactory::new();
++    let tools = vec![create_test_tools()[0].clone()];
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Required));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    assert_eq!(constraint.0, "json_schema");
++
++    let schema: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    let any_of = schema["items"]["anyOf"].as_array().unwrap();
++    assert_eq!(any_of.len(), 1);
++    assert_eq!(any_of[0]["properties"]["name"]["enum"][0], "get_weather");
++}
++
++// ============================================================================
++// Specific function tests
++// ============================================================================
++
++#[test]
++fn test_specific_function_generates_json_schema() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Function {
++        tool_type: "function".to_string(),
++        function: FunctionChoice {
++            name: "search".to_string(),
++        },
++    });
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    assert_eq!(constraint.0, "json_schema");
++
++    let schema: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    assert_eq!(schema["type"], "array");
++    assert_eq!(schema["minItems"], 1);
++    assert_eq!(schema["maxItems"], 1);
++
++    let items = &schema["items"];
++    assert_eq!(items["properties"]["name"]["enum"][0], "search");
++}
++
++// ============================================================================
++// parallel_tool_calls parameter tests
++// ============================================================================
++
++#[test]
++fn test_parallel_true_no_maxitems() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Required));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    let schema: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++
++    assert!(schema.get("maxItems").is_none());
++}
++
++#[test]
++fn test_parallel_false_sets_maxitems() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Required));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        false,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    let schema: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++
++    assert_eq!(schema["maxItems"], 1);
++}
++
++#[test]
++fn test_auto_mode_stop_after_first() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        false,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++
++    assert_eq!(tag_json["stop_after_first"], true);
++}
++
++// ============================================================================
++// Configured parser precedence tests
++// ============================================================================
++
++#[test]
++fn test_configured_parser_takes_precedence() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++    let configured_parser = &"llama".to_string();
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        Some(configured_parser),
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++
++    let tag_json: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    let triggers = tag_json["triggers"].as_array().unwrap();
++
++    assert!(
++        triggers.iter().any(|t| t == "<|python_tag|>"),
++        "Should use llama parser, not json parser for gpt-4"
++    );
++}
++
++#[test]
++fn test_auto_detection_when_no_configured_parser() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++
++    let tag_json: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    let triggers = tag_json["triggers"].as_array().unwrap();
++
++    assert!(
++        triggers.iter().any(|t| t == "[TOOL_CALLS]"),
++        "Should auto-detect json parser for gpt-4"
++    );
++}
++
++#[test]
++fn test_configured_parser_invalid_falls_back() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++    let configured_parser = &"invalid_parser".to_string();
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        Some(configured_parser),
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++
++    let tag_json: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    let triggers = tag_json["triggers"].as_array().unwrap();
++
++    assert!(
++        triggers.iter().any(|t| t == "[TOOL_CALLS]"),
++        "Should fall back to auto-detection when configured parser is invalid"
++    );
++}
++
++// ============================================================================
++// AllowedTools mode tests
++// ============================================================================
++
++#[test]
++fn test_allowed_tools_auto_mode() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::AllowedTools {
++        tool_type: "allowed_tools".to_string(),
++        mode: "auto".to_string(),
++        tools: vec![
++            ToolReference::Function {
++                name: "get_weather".to_string(),
++            },
++            ToolReference::Function {
++                name: "search".to_string(),
++            },
++        ],
++    });
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    assert_eq!(constraint.0, "structural_tag");
++}
++
++#[test]
++fn test_allowed_tools_required_mode() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::AllowedTools {
++        tool_type: "allowed_tools".to_string(),
++        mode: "required".to_string(),
++        tools: vec![
++            ToolReference::Function {
++                name: "get_weather".to_string(),
++            },
++            ToolReference::Function {
++                name: "search".to_string(),
++            },
++        ],
++    });
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    assert_eq!(constraint.0, "json_schema");
++}
++
++// ============================================================================
++// Edge cases and error handling
++// ============================================================================
++
++#[test]
++fn test_empty_tools_returns_none() {
++    let factory = ParserFactory::new();
++    let tools: Vec<Tool> = vec![];
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap();
++    assert!(constraint.is_none());
++}
++
++#[test]
++fn test_none_tool_choice_returns_none() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice: Option<ToolChoice> = None;
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap();
++    assert!(constraint.is_none());
++}
++
++#[test]
++fn test_schema_serialization_valid_json() {
++    let factory = ParserFactory::new();
++    let tools = vec![create_tool_with_defs()];
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Required));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++
++    let schema: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    assert!(schema["$defs"].is_object());
++    assert_eq!(schema["$defs"]["Item"]["type"], "object");
++}
++
++#[test]
++fn test_structural_tag_valid_json() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++
++    let tag: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++    assert_eq!(tag["format"], "triggered_tags");
++    assert!(tag["tags"].is_array());
++    assert!(tag["triggers"].is_array());
++}
++
++// ============================================================================
++// Multiple tools in schema
++// ============================================================================
++
++#[test]
++fn test_required_mode_multiple_tools() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Required));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    let schema: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++
++    let any_of = schema["items"]["anyOf"].as_array().unwrap();
++    assert_eq!(any_of.len(), 2);
++
++    let names: Vec<&str> = any_of
++        .iter()
++        .map(|item| item["properties"]["name"]["enum"][0].as_str().unwrap())
++        .collect();
++
++    assert!(names.contains(&"get_weather"));
++    assert!(names.contains(&"search"));
++}
++
++#[test]
++fn test_required_mode_with_all_properties() {
++    let factory = ParserFactory::new();
++    let tools = create_test_tools();
++    let tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Required));
++
++    let result = constraints::build_tool_call_constraint(
++        &tools,
++        &tool_choice,
++        true,
++        &factory,
++        None,
++        "gpt-4",
++    );
++
++    assert!(result.is_ok());
++    let constraint = result.unwrap().unwrap();
++    let schema: serde_json::Value = serde_json::from_str(&constraint.1).unwrap();
++
++    let any_of = schema["items"]["anyOf"].as_array().unwrap();
++
++    for item in any_of {
++        assert!(item["properties"]["name"].is_object());
++        assert!(item["properties"]["parameters"].is_object());
++        assert!(item["required"]
++            .as_array()
++            .unwrap()
++            .contains(&"name".into()));
++        assert!(item["required"]
++            .as_array()
++            .unwrap()
++            .contains(&"parameters".into()));
++    }
++}
+diff --git a/sgl-model-gateway/tests/tool_parser/test_structural_tag.rs b/sgl-model-gateway/tests/tool_parser/test_structural_tag.rs
+new file mode 100644
+index 000000000..c3d3ab8c1
+--- /dev/null
++++ b/sgl-model-gateway/tests/tool_parser/test_structural_tag.rs
+@@ -0,0 +1,300 @@
++//! Tests for structural tag generation by tool parsers
++//!
++//! Tests each parser's `get_format_info()` and `build_structural_tag()` methods
++//! according to GitHub issue #13032 requirements
++
++use smg::protocols::common::Tool;
++use smg::tool_parser::{
++    parsers::{DeepSeekParser, JsonParser, LlamaParser, MistralParser, QwenParser},
++    traits::ToolParser,
++};
++
++/// Helper to create a test tool
++fn create_test_tool(name: &str) -> Tool {
++    Tool {
++        tool_type: "function".to_string(),
++        function: smg::protocols::common::Function {
++            name: name.to_string(),
++            description: Some(format!("Test function: {}", name)),
++            parameters: serde_json::json!({
++                "type": "object",
++                "properties": {
++                    "param1": {"type": "string"},
++                    "param2": {"type": "number"}
++                }
++            }),
++            strict: None,
++        },
++    }
++}
++
++// ============================================================================
++// get_format_info() Tests - Each parser's format-specific patterns
++// ============================================================================
++
++#[test]
++fn test_llama_get_format_info() {
++    let parser = LlamaParser::new();
++    let (begin, end, trigger) = parser.get_format_info("test_function");
++
++    assert_eq!(begin, r#"{"name":"test_function", "arguments":"#);
++    assert_eq!(end, "}");
++    assert_eq!(trigger, "<|python_tag|>");
++}
++
++#[test]
++fn test_mistral_get_format_info() {
++    let parser = MistralParser::new();
++    let (begin, end, trigger) = parser.get_format_info("my_tool");
++
++    assert_eq!(begin, "{\"name\": \"");
++    assert_eq!(end, "\"}");
++    assert_eq!(trigger, "[TOOL_CALLS]");
++}
++
++#[test]
++fn test_qwen_get_format_info() {
++    let parser = QwenParser::new();
++    let (begin, end, trigger) = parser.get_format_info("search_tool");
++
++    assert_eq!(begin, "{\"name\": \"");
++    assert_eq!(end, "\"}");
++    assert_eq!(trigger, "<|tool_call|>");
++}
++
++#[test]
++fn test_json_get_format_info() {
++    let parser = JsonParser::new();
++    let (begin, end, trigger) = parser.get_format_info("json_func");
++
++    assert_eq!(begin, "{\"name\":\"json_func\", \"arguments\":");
++    assert_eq!(end, "\"}");
++    assert_eq!(trigger, "[TOOL_CALLS]");
++}
++
++// ============================================================================
++// build_structural_tag() Tests - Default implementation (triggered_tags format)
++// ============================================================================
++
++#[test]
++fn test_llama_build_structural_tag_default() {
++    let parser = LlamaParser::new();
++    let tools = vec![create_test_tool("get_weather")];
++
++    let tag = parser.build_structural_tag(&tools, false, false).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    assert_eq!(tag_json["format"], "triggered_tags");
++    assert!(tag_json["triggers"]
++        .as_array()
++        .unwrap()
++        .contains(&"<|python_tag|>".into()));
++    assert_eq!(tag_json["at_least_one"], false);
++    assert_eq!(tag_json["stop_after_first"], false);
++
++    let tags = tag_json["tags"].as_array().unwrap();
++    assert_eq!(tags.len(), 1);
++    assert_eq!(tags[0]["format"], "tag");
++    assert!(tags[0]["begin"].as_str().unwrap().contains("get_weather"));
++    assert_eq!(tags[0]["content"]["format"], "json_schema");
++}
++
++#[test]
++fn test_mistral_build_structural_tag_default() {
++    let parser = MistralParser::new();
++    let tools = vec![create_test_tool("search")];
++
++    let tag = parser.build_structural_tag(&tools, false, false).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    assert_eq!(tag_json["format"], "triggered_tags");
++    assert!(tag_json["triggers"]
++        .as_array()
++        .unwrap()
++        .contains(&"[TOOL_CALLS]".into()));
++
++    let tags = tag_json["tags"].as_array().unwrap();
++    assert_eq!(tags.len(), 1);
++    assert_eq!(tags[0]["format"], "tag");
++    assert!(tags[0]["begin"].as_str().unwrap().contains("name"));
++}
++
++#[test]
++fn test_multiple_tools_default() {
++    let parser = LlamaParser::new();
++    let tools = vec![
++        create_test_tool("tool1"),
++        create_test_tool("tool2"),
++        create_test_tool("tool3"),
++    ];
++
++    let tag = parser.build_structural_tag(&tools, false, false).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    let tags = tag_json["tags"].as_array().unwrap();
++    assert_eq!(tags.len(), 3);
++}
++
++// ============================================================================
++// at_least_one and stop_after_first parameter tests
++// ============================================================================
++
++#[test]
++fn test_at_least_one_true() {
++    let parser = LlamaParser::new();
++    let tools = vec![create_test_tool("weather")];
++
++    let tag = parser.build_structural_tag(&tools, true, false).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    assert_eq!(tag_json["at_least_one"], true);
++}
++
++#[test]
++fn test_stop_after_first_true() {
++    let parser = JsonParser::new();
++    let tools = vec![create_test_tool("calc")];
++
++    let tag = parser.build_structural_tag(&tools, false, true).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    assert_eq!(tag_json["stop_after_first"], true);
++}
++
++// ============================================================================
++// DeepSeek Parser - Special case with tags_with_separator override
++// ============================================================================
++
++#[test]
++fn test_deepseek_build_structural_tag_override() {
++    let parser = DeepSeekParser::new();
++    let tools = vec![create_test_tool("deepseek_tool")];
++
++    let tag = parser.build_structural_tag(&tools, false, false).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    assert_eq!(tag_json["format"], "triggered_tags");
++    assert!(tag_json["triggers"]
++        .as_array()
++        .unwrap()
++        .contains(&"<｜tool▁calls▁begin｜>".into()));
++
++    let outer_tags = tag_json["tags"].as_array().unwrap();
++    assert_eq!(outer_tags.len(), 1);
++    assert!(outer_tags[0]["begin"]
++        .as_str()
++        .unwrap()
++        .contains("<｜tool▁calls▁begin｜>"));
++    assert_eq!(
++        outer_tags[0]["end"].as_str().unwrap(),
++        "\\n<｜tool▁calls▁end｜>"
++    );
++
++    let inner_content = &outer_tags[0]["content"];
++    assert_eq!(inner_content["format"], "tags_with_separator");
++    assert_eq!(inner_content["separator"], "\\n");
++
++    let inner_tags = inner_content["tags"].as_array().unwrap();
++    assert_eq!(inner_tags.len(), 1);
++    assert_eq!(inner_tags[0]["format"], "tag");
++}
++
++#[test]
++fn test_deepseek_multiple_tools_with_separator() {
++    let parser = DeepSeekParser::new();
++    let tools = vec![
++        create_test_tool("tool1"),
++        create_test_tool("tool2"),
++        create_test_tool("tool3"),
++    ];
++
++    let tag = parser.build_structural_tag(&tools, false, false).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    let outer_tags = tag_json["tags"].as_array().unwrap();
++    let inner_content = &outer_tags[0]["content"];
++    let inner_tags = inner_content["tags"].as_array().unwrap();
++
++    assert_eq!(inner_tags.len(), 3);
++    assert_eq!(inner_content["separator"], "\\n");
++}
++
++#[test]
++fn test_deepseek_with_constraints() {
++    let parser = DeepSeekParser::new();
++    let tools = vec![create_test_tool("constrained_tool")];
++
++    let tag = parser.build_structural_tag(&tools, true, true).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    assert_eq!(tag_json["at_least_one"], false);
++    assert_eq!(tag_json["stop_after_first"], false);
++
++    let inner_content = &tag_json["tags"][0]["content"];
++    assert_eq!(inner_content["at_least_one"], true);
++    assert_eq!(inner_content["stop_after_first"], true);
++}
++
++// ============================================================================
++// Schema handling in structural tags
++// ============================================================================
++
++#[test]
++fn test_schema_included_in_structural_tag() {
++    let parser = JsonParser::new();
++    let tools = vec![create_test_tool("schema_tool")];
++
++    let tag = parser.build_structural_tag(&tools, false, false).unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    let schema = &tag_json["tags"][0]["content"]["schema"];
++    assert!(schema.is_object());
++    assert_eq!(schema["type"], "object");
++    assert!(schema["properties"].is_object());
++}
++
++#[test]
++fn test_complex_schema_in_structural_tag() {
++    let parser = LlamaParser::new();
++    let complex_schema = serde_json::json!({
++        "type": "object",
++        "properties": {
++            "nested": {
++                "type": "object",
++                "properties": {
++                    "inner": {"type": "string"}
++                }
++            },
++            "array_param": {"type": "array", "items": {"type": "number"}},
++            "optional_param": {"type": "boolean"}
++        },
++        "required": ["nested"]
++    });
++
++    let complex_tool = Tool {
++        tool_type: "function".to_string(),
++        function: smg::protocols::common::Function {
++            name: "complex_func".to_string(),
++            description: Some("Complex test function: complex_func".to_string()),
++            parameters: complex_schema,
++            strict: None,
++        },
++    };
++
++    let tag = parser
++        .build_structural_tag(&[complex_tool], false, false)
++        .unwrap();
++    let tag_json: serde_json::Value = serde_json::from_str(&tag).unwrap();
++
++    let schema = &tag_json["tags"][0]["content"]["schema"];
++    assert_eq!(schema["type"], "object");
++    assert!(schema["properties"]["nested"]["properties"]["inner"].is_object());
++    assert_eq!(
++        schema["properties"]["array_param"]["items"]["type"],
++        "number"
++    );
++    assert!(schema["required"]
++        .as_array()
++        .unwrap()
++        .contains(&"nested".into()));
++}
+-- 
+2.52.0
+

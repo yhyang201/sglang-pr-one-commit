@@ -1,0 +1,395 @@
+From 6db7d1bd8a48c85b47a965ca29890d4042d63c2e Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:51:07 +0000
+Subject: [PATCH] feat: Squash PR #16579 changes
+
+---
+ .github/workflows/pr-test-amd.yml |  40 ++++++++-
+ .github/workflows/pr-test.yml     |  72 ++++++++++++++++
+ scripts/ci/merge_metrics.py       | 136 ++++++++++++++++++++++++++++++
+ 3 files changed, 246 insertions(+), 2 deletions(-)
+ create mode 100755 scripts/ci/merge_metrics.py
+
+diff --git a/.github/workflows/pr-test-amd.yml b/.github/workflows/pr-test-amd.yml
+index 47db7182f..939a9269b 100644
+--- a/.github/workflows/pr-test-amd.yml
++++ b/.github/workflows/pr-test-amd.yml
+@@ -202,6 +202,8 @@ jobs:
+         runner: [linux-mi325-gpu-1]
+         part: [0, 1, 2, 3]
+     runs-on: ${{matrix.runner}}
++    env:
++      METRICS_DIR: ${{ github.workspace }}/.ci_metrics
+     steps:
+       - name: Checkout code
+         uses: actions/checkout@v4
+@@ -219,10 +221,26 @@ jobs:
+       - name: Install dependencies
+         run: bash scripts/ci/amd_ci_install_dependency.sh
+ 
++      - name: Setup metrics directory
++        run: |
++          mkdir -p $METRICS_DIR
++
+       - name: Run test
+         timeout-minutes: 30
+         run: |
+-          bash scripts/ci/amd_ci_exec.sh -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-b-test-small-1-gpu --auto-partition-id ${{ matrix.part }} --auto-partition-size 4
++          bash scripts/ci/amd_ci_exec.sh -e SGLANG_TEST_METRICS_OUTPUT=/sglang-checkout/.ci_metrics/test_metrics -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-b-test-small-1-gpu --auto-partition-id ${{ matrix.part }} --auto-partition-size 4
++
++      - name: Merge metrics
++        if: always()
++        run: |
++          python3 scripts/ci/merge_metrics.py "$METRICS_DIR/test_metrics" "$METRICS_DIR/test_metrics.jsonl"
++
++      - name: Upload metrics artifact
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: regression-metrics-${{ github.run_id }}-${{ github.job }}-partition-${{ matrix.part }}
++          path: ${{ env.METRICS_DIR }}/
+ 
+   stage-b-test-large-2-gpu-amd:
+     needs: [check-changes, stage-a-test-1-amd]
+@@ -241,6 +259,8 @@ jobs:
+       matrix:
+         runner: [linux-mi325-gpu-2]
+     runs-on: ${{matrix.runner}}
++    env:
++      METRICS_DIR: ${{ github.workspace }}/.ci_metrics
+     steps:
+       - name: Checkout code
+         uses: actions/checkout@v4
+@@ -258,10 +278,26 @@ jobs:
+       - name: Install dependencies
+         run: bash scripts/ci/amd_ci_install_dependency.sh
+ 
++      - name: Setup metrics directory
++        run: |
++          mkdir -p $METRICS_DIR
++
+       - name: Run test
+         timeout-minutes: 30
+         run: |
+-          bash scripts/ci/amd_ci_exec.sh -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-b-test-large-2-gpu-amd
++          bash scripts/ci/amd_ci_exec.sh -e SGLANG_TEST_METRICS_OUTPUT=/sglang-checkout/.ci_metrics/test_metrics -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-b-test-large-2-gpu-amd
++
++      - name: Merge metrics
++        if: always()
++        run: |
++          python3 scripts/ci/merge_metrics.py "$METRICS_DIR/test_metrics" "$METRICS_DIR/test_metrics.jsonl"
++
++      - name: Upload metrics artifact
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: regression-metrics-${{ github.run_id }}-${{ github.job }}
++          path: ${{ env.METRICS_DIR }}/
+ 
+   multimodal-gen-test-1-gpu-amd:
+     needs: [check-changes]
+diff --git a/.github/workflows/pr-test.yml b/.github/workflows/pr-test.yml
+index f71dab83d..8816a0e4e 100644
+--- a/.github/workflows/pr-test.yml
++++ b/.github/workflows/pr-test.yml
+@@ -584,6 +584,8 @@ jobs:
+     runs-on: 1-gpu-runner
+     env:
+       RUNNER_LABELS: 1-gpu-runner
++      METRICS_DIR: ${{ github.workspace }}/.ci_metrics
++      SGLANG_TEST_METRICS_OUTPUT: ${{ github.workspace }}/.ci_metrics/test_metrics
+     strategy:
+       fail-fast: false
+       matrix:
+@@ -606,6 +608,10 @@ jobs:
+         run: |
+           CUSTOM_BUILD_SGL_KERNEL=${{needs.check-changes.outputs.sgl_kernel}} bash scripts/ci/ci_install_dependency.sh
+ 
++      - name: Setup metrics directory
++        run: |
++          mkdir -p $METRICS_DIR
++
+       - name: Run test
+         timeout-minutes: 30
+         run: |
+@@ -616,6 +622,18 @@ jobs:
+           fi
+           python3 run_suite.py --hw cuda --suite stage-b-test-small-1-gpu --auto-partition-id ${{ matrix.partition }} --auto-partition-size 8 $CONTINUE_ON_ERROR_FLAG
+ 
++      - name: Merge metrics
++        if: always()
++        run: |
++          python3 scripts/ci/merge_metrics.py "$SGLANG_TEST_METRICS_OUTPUT" "$METRICS_DIR/test_metrics.jsonl"
++
++      - name: Upload metrics artifact
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: regression-metrics-${{ github.run_id }}-${{ github.job }}-partition-${{ matrix.partition }}
++          path: ${{ env.METRICS_DIR }}/
++
+   stage-b-test-large-1-gpu:
+     needs: [check-changes, call-gate, stage-a-test-1, sgl-kernel-build-wheels]
+     if: |
+@@ -631,6 +649,8 @@ jobs:
+     runs-on: 1-gpu-runner
+     env:
+       RUNNER_LABELS: 1-gpu-runner
++      METRICS_DIR: ${{ github.workspace }}/.ci_metrics
++      SGLANG_TEST_METRICS_OUTPUT: ${{ github.workspace }}/.ci_metrics/test_metrics
+     steps:
+       - name: Checkout code
+         uses: actions/checkout@v4
+@@ -649,6 +669,10 @@ jobs:
+         run: |
+           CUSTOM_BUILD_SGL_KERNEL=${{needs.check-changes.outputs.sgl_kernel}} bash scripts/ci/ci_install_dependency.sh
+ 
++      - name: Setup metrics directory
++        run: |
++          mkdir -p $METRICS_DIR
++
+       - name: Run test
+         timeout-minutes: 30
+         run: |
+@@ -659,6 +683,18 @@ jobs:
+           fi
+           python3 run_suite.py --hw cuda --suite stage-b-test-large-1-gpu $CONTINUE_ON_ERROR_FLAG
+ 
++      - name: Merge metrics
++        if: always()
++        run: |
++          python3 scripts/ci/merge_metrics.py "$SGLANG_TEST_METRICS_OUTPUT" "$METRICS_DIR/test_metrics.jsonl"
++
++      - name: Upload metrics artifact
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: regression-metrics-${{ github.run_id }}-${{ github.job }}
++          path: ${{ env.METRICS_DIR }}/
++
+   stage-b-test-large-2-gpu:
+     needs: [check-changes, call-gate, stage-a-test-1, sgl-kernel-build-wheels]
+     if: |
+@@ -674,6 +710,8 @@ jobs:
+     runs-on: 2-gpu-runner
+     env:
+       RUNNER_LABELS: 2-gpu-runner
++      METRICS_DIR: ${{ github.workspace }}/.ci_metrics
++      SGLANG_TEST_METRICS_OUTPUT: ${{ github.workspace }}/.ci_metrics/test_metrics
+     steps:
+       - name: Checkout code
+         uses: actions/checkout@v4
+@@ -692,6 +730,10 @@ jobs:
+         run: |
+           CUSTOM_BUILD_SGL_KERNEL=${{needs.check-changes.outputs.sgl_kernel}} bash scripts/ci/ci_install_dependency.sh
+ 
++      - name: Setup metrics directory
++        run: |
++          mkdir -p $METRICS_DIR
++
+       - name: Run test
+         timeout-minutes: 30
+         run: |
+@@ -702,6 +744,18 @@ jobs:
+           fi
+           python3 run_suite.py --hw cuda --suite stage-b-test-large-2-gpu $CONTINUE_ON_ERROR_FLAG
+ 
++      - name: Merge metrics
++        if: always()
++        run: |
++          python3 scripts/ci/merge_metrics.py "$SGLANG_TEST_METRICS_OUTPUT" "$METRICS_DIR/test_metrics.jsonl"
++
++      - name: Upload metrics artifact
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: regression-metrics-${{ github.run_id }}-${{ github.job }}
++          path: ${{ env.METRICS_DIR }}/
++
+   stage-c-test-large-4-gpu:
+     needs: [check-changes, call-gate, stage-b-test-small-1-gpu, stage-b-test-large-1-gpu, stage-b-test-large-2-gpu, sgl-kernel-build-wheels]
+     if: |
+@@ -995,6 +1049,8 @@ jobs:
+     runs-on: ${{ needs.check-changes.outputs.b200_runner }}
+     env:
+       RUNNER_LABELS: ${{ needs.check-changes.outputs.b200_runner }}
++      METRICS_DIR: ${{ github.workspace }}/.ci_metrics
++      SGLANG_TEST_METRICS_OUTPUT: ${{ github.workspace }}/.ci_metrics/test_metrics
+     strategy:
+       fail-fast: false
+ 
+@@ -1016,6 +1072,10 @@ jobs:
+         run: |
+           CUSTOM_BUILD_SGL_KERNEL=${{needs.check-changes.outputs.sgl_kernel}} IS_BLACKWELL=1 bash scripts/ci/ci_install_dependency.sh
+ 
++      - name: Setup metrics directory
++        run: |
++          mkdir -p $METRICS_DIR
++
+       - name: Run test
+         timeout-minutes: 30
+         run: |
+@@ -1026,6 +1086,18 @@ jobs:
+           fi
+           IS_BLACKWELL=1 python3 run_suite.py --hw cuda --suite stage-b-test-4-gpu-b200 $CONTINUE_ON_ERROR_FLAG
+ 
++      - name: Merge metrics
++        if: always()
++        run: |
++          python3 scripts/ci/merge_metrics.py "$SGLANG_TEST_METRICS_OUTPUT" "$METRICS_DIR/test_metrics.jsonl"
++
++      - name: Upload metrics artifact
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: regression-metrics-${{ github.run_id }}-${{ github.job }}
++          path: ${{ env.METRICS_DIR }}/
++
+ 
+   unit-test-backend-2-gpu:
+     needs: [check-changes, call-gate, unit-test-backend-1-gpu]
+diff --git a/scripts/ci/merge_metrics.py b/scripts/ci/merge_metrics.py
+new file mode 100755
+index 000000000..d8b7ab53b
+--- /dev/null
++++ b/scripts/ci/merge_metrics.py
+@@ -0,0 +1,136 @@
++#!/usr/bin/env python3
++"""
++Merge multiple test metrics JSONL files into a single output file.
++
++This script searches for files matching ${base_path}.*.jsonl pattern,
++parses and validates each line as JSON, and merges them into a single
++output file. Invalid lines are skipped with warnings to stderr.
++
++Usage:
++    python3 merge_metrics.py <base_path> <output_file>
++
++Example:
++    python3 merge_metrics.py /tmp/test_metrics /tmp/merged_metrics.jsonl
++
++This will search for /tmp/test_metrics.*.jsonl files and merge them.
++"""
++
++import argparse
++import glob
++import json
++import sys
++from pathlib import Path
++
++
++def merge_metrics(base_path: str, output_file: str) -> int:
++    """
++    Merge multiple metrics JSONL files into a single output.
++
++    Args:
++        base_path: Base path pattern for input files (without .*.jsonl suffix)
++        output_file: Path to the output merged JSONL file
++
++    Returns:
++        0 on success, 1 on error
++    """
++    # Search for all matching JSONL files
++    pattern = f"{base_path}.*.jsonl"
++    input_files = sorted(glob.glob(pattern))
++
++    if not input_files:
++        # No input files found - create empty output file
++        print(
++            f"No input files found matching pattern: {pattern}",
++            file=sys.stderr,
++        )
++        print(f"Creating empty output file: {output_file}", file=sys.stderr)
++        try:
++            output_path = Path(output_file)
++            output_path.parent.mkdir(parents=True, exist_ok=True)
++            output_path.touch()
++        except IOError as e:
++            print(
++                f"Error: Failed to create empty output file {output_file}: {e}",
++                file=sys.stderr,
++            )
++            return 1
++        return 0
++
++    print(
++        f"Found {len(input_files)} metrics file(s) to merge",
++        file=sys.stderr,
++    )
++
++    total_lines = 0
++    valid_lines = 0
++    invalid_lines = 0
++
++    try:
++        # Ensure output directory exists
++        Path(output_file).parent.mkdir(parents=True, exist_ok=True)
++
++        with open(output_file, "w", encoding="utf-8") as out_f:
++            for input_file in input_files:
++                print(f"Processing: {input_file}", file=sys.stderr)
++                try:
++                    with open(input_file, "r", encoding="utf-8") as in_f:
++                        for line_num, line in enumerate(in_f, 1):
++                            total_lines += 1
++                            line = line.strip()
++                            if not line:
++                                # Skip empty lines
++                                continue
++
++                            try:
++                                # Validate JSON by parsing
++                                json.loads(line)
++                                # Write valid line to output
++                                out_f.write(line + "\n")
++                                valid_lines += 1
++                            except json.JSONDecodeError as e:
++                                invalid_lines += 1
++                                print(
++                                    f"Warning: Invalid JSON in {input_file}:{line_num}: {e}",
++                                    file=sys.stderr,
++                                )
++                                print(f"  Skipping line: {line[:100]}", file=sys.stderr)
++                except IOError as e:
++                    print(
++                        f"Warning: Failed to read {input_file}: {e}",
++                        file=sys.stderr,
++                    )
++                    continue
++
++        print(
++            f"Merge complete: {valid_lines} valid lines written to {output_file}",
++            file=sys.stderr,
++        )
++        if invalid_lines > 0:
++            print(
++                f"Warning: Skipped {invalid_lines} invalid line(s)",
++                file=sys.stderr,
++            )
++
++        return 0
++
++    except IOError as e:
++        print(f"Error: Failed to write output file {output_file}: {e}", file=sys.stderr)
++        return 1
++
++
++def main():
++    parser = argparse.ArgumentParser(
++        description="Merge multiple test metrics JSONL files into a single output file.",
++        epilog="Example: python3 merge_metrics.py /tmp/test_metrics /tmp/merged.jsonl",
++    )
++    parser.add_argument(
++        "base_path", help="Base path pattern for input files (without .*.jsonl suffix)"
++    )
++    parser.add_argument("output_file", help="Path to the output merged JSONL file")
++    args = parser.parse_args()
++
++    return merge_metrics(args.base_path, args.output_file)
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.52.0
+

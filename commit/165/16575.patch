@@ -1,0 +1,39 @@
+From 60188faa3b446c80c9cd9e2bca572d52ca71fd5f Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:51:23 +0000
+Subject: [PATCH] feat: Squash PR #16575 changes
+
+---
+ python/sglang/bench_serving.py | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/python/sglang/bench_serving.py b/python/sglang/bench_serving.py
+index 8eca2251c..880221138 100644
+--- a/python/sglang/bench_serving.py
++++ b/python/sglang/bench_serving.py
+@@ -1862,8 +1862,8 @@ def sample_generated_shared_prefix_requests(
+             total_input_tokens += prompt_len
+             total_output_tokens += output_len_val
+ 
+-    # Shuffle questions
+-    random.shuffle(input_requests)
++    if not getattr(args, "gsp_ordered", False):
++        random.shuffle(input_requests)
+ 
+     # Print statistics
+     print(f"\nGenerated shared prefix dataset statistics:")
+@@ -3192,6 +3192,11 @@ if __name__ == "__main__":
+         default=1,
+         help="Number of turns for multi-turn conversations. If > 1, each prompt becomes a list of questions sharing the same system prefix.",
+     )
++    group.add_argument(
++        "--gsp-ordered",
++        action="store_true",
++        help="Keep requests in order without shuffling. By default, requests are shuffled randomly.",
++    )
+     mooncake_group = parser.add_argument_group("mooncake dataset arguments")
+     mooncake_group.add_argument(
+         "--mooncake-slowdown-factor",
+-- 
+2.52.0
+

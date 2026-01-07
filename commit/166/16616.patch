@@ -1,0 +1,48 @@
+From 3b519468b8033d4824e30effcab452297732c898 Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:49:07 +0000
+Subject: [PATCH] feat: Squash PR #16616 changes
+
+---
+ python/sglang/srt/managers/cache_controller.py | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/python/sglang/srt/managers/cache_controller.py b/python/sglang/srt/managers/cache_controller.py
+index 0caa63cde..e254e36fb 100644
+--- a/python/sglang/srt/managers/cache_controller.py
++++ b/python/sglang/srt/managers/cache_controller.py
+@@ -671,6 +671,10 @@ class HiCacheController:
+                 )
+             except Empty:
+                 continue
++            except Exception as e:
++                logger.error(e)
++                break
++        logger.warning("Prefetch IO auxiliary thread exiting.")
+ 
+     def prefetch_rate_limited(self) -> bool:
+         """
+@@ -763,6 +767,11 @@ class HiCacheController:
+             except Empty:
+                 continue
+ 
++            except Exception as e:
++                logger.error(e)
++                break
++        logger.warning("Prefetch thread exiting.")
++
+     def write_storage(
+         self,
+         host_indices: torch.Tensor,
+@@ -831,3 +840,8 @@ class HiCacheController:
+ 
+             except Empty:
+                 continue
++
++            except Exception as e:
++                logger.error(e)
++                break
++        logger.warning("Backup thread exiting.")
+-- 
+2.52.0
+

@@ -1,0 +1,34 @@
+From e43bf9f2a3444e61fb57e72049b255453a20a706 Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:50:36 +0000
+Subject: [PATCH] feat: Squash PR #16587 changes
+
+---
+ python/sglang/srt/models/utils.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/python/sglang/srt/models/utils.py b/python/sglang/srt/models/utils.py
+index 3ebd82448..7348e497a 100644
+--- a/python/sglang/srt/models/utils.py
++++ b/python/sglang/srt/models/utils.py
+@@ -26,7 +26,7 @@ from sglang.srt.environ import envs
+ from sglang.srt.layers.radix_attention import RadixAttention
+ from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+-from sglang.srt.utils import is_cuda
++from sglang.srt.utils import get_current_device_stream_fast, is_cuda
+ from sglang.srt.utils.custom_op import register_custom_op
+ 
+ if TYPE_CHECKING:
+@@ -246,7 +246,7 @@ def apply_qk_norm(
+         return q, k
+ 
+     if alt_stream is not None and get_is_capture_mode():
+-        current_stream = torch.cuda.current_stream()
++        current_stream = get_current_device_stream_fast()
+         alt_stream.wait_stream(current_stream)
+         q_by_head = q.reshape(-1, head_dim)
+         q_by_head = q_norm(q_by_head)
+-- 
+2.52.0
+

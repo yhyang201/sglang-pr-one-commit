@@ -1,0 +1,396 @@
+From cc906beebc9830f5419bbbcb64516d992d93013d Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:49:42 +0000
+Subject: [PATCH] feat: Squash PR #16602 changes
+
+---
+ docs/advanced_features/hicache_design.md      |  4 +-
+ docs/advanced_features/server_arguments.md    |  2 +-
+ python/sglang/srt/mem_cache/hiradix_cache.py  | 33 +++++---
+ .../srt/mem_cache/storage/nixl/README.md      | 14 ++++
+ .../mem_cache/storage/nixl/hicache_nixl.py    | 12 ++-
+ .../storage/nixl/nixl.config.toml.sample      | 38 +++++++++
+ .../srt/mem_cache/storage/nixl/nixl_utils.py  | 83 +++++++++++++++++--
+ python/sglang/srt/server_args.py              |  2 +-
+ 8 files changed, 166 insertions(+), 22 deletions(-)
+ create mode 100644 python/sglang/srt/mem_cache/storage/nixl/nixl.config.toml.sample
+
+diff --git a/docs/advanced_features/hicache_design.md b/docs/advanced_features/hicache_design.md
+index b775cef5a..60e0c990c 100644
+--- a/docs/advanced_features/hicache_design.md
++++ b/docs/advanced_features/hicache_design.md
+@@ -152,4 +152,6 @@ Specifically, **LMCache**, an efficient KV cache layer for enterprise-scale LLM
+ 
+ - **`--enable-lmcache`**: Using LMCache as an alternative hierarchical cache solution.
+ 
+-- **`--hicache-storage-backend-extra-config HICACHE_STORAGE_BACKEND_EXTRA_CONFIG`**: JSON string containing extra configuration for the storage backend, e.g., `--hicache-storage-backend-extra-config '{"prefetch_threshold":512, "prefetch_timeout_base": 0.5, "prefetch_timeout_per_ki_token": 0.25}' `
++- **`--hicache-storage-backend-extra-config HICACHE_STORAGE_BACKEND_EXTRA_CONFIG`**: the extra config can be either 
++  - a JSON string containing extra configuration for the storage backend, e.g., `--hicache-storage-backend-extra-config '{"prefetch_threshold":512, "prefetch_timeout_base": 0.5, "prefetch_timeout_per_ki_token": 0.25}' `, or
++  - a TOML or JSON or YAML file specifying the extra configuration for the storage backend (to differentiate from the JSON string input, prepend a `@` in front of the file name), e.g., `--hicache-storage-backend-extra-config "@config.toml"` where `config.toml` is the config file containing the complex configurations. This can be useful when the configuration consists of many or complex key-value pairs (for instance, it is preferred to use a config file for NIXL backend as its configurations can be complex).
+diff --git a/docs/advanced_features/server_arguments.md b/docs/advanced_features/server_arguments.md
+index c2914f789..cf6ff3b55 100644
+--- a/docs/advanced_features/server_arguments.md
++++ b/docs/advanced_features/server_arguments.md
+@@ -324,7 +324,7 @@ Please consult the documentation below and [server_args.py](https://github.com/s
+ | `--hicache-mem-layout` | The layout of host memory pool for hierarchical cache. | `layer_first` | `layer_first`, `page_first`, `page_first_direct`, `page_first_kv_split` |
+ | `--hicache-storage-backend` | The storage backend for hierarchical KV cache. Built-in backends: file, mooncake, hf3fs, nixl, aibrix. For dynamic backend, use --hicache-storage-backend-extra-config to specify: backend_name (custom name), module_path (Python module path), class_name (backend class name). | `None` | `file`, `mooncake`, `hf3fs`, `nixl`, `aibrix`, `dynamic`, `eic` |
+ | `--hicache-storage-prefetch-policy` | Control when prefetching from the storage backend should stop. | `best_effort` | `best_effort`, `wait_complete`, `timeout` |
+-| `--hicache-storage-backend-extra-config` | A dictionary in JSON string format containing extra configuration for the storage backend. | `None` | Type: str |
++| `--hicache-storage-backend-extra-config` | A dictionary in JSON string format, or a string starting with a `@` followed by a config file in JSON/YAML/TOML format, containing extra configuration for the storage backend. | `None` | Type: str |
+ 
+ ## LMCache
+ | Argument | Description | Defaults | Options |
+diff --git a/python/sglang/srt/mem_cache/hiradix_cache.py b/python/sglang/srt/mem_cache/hiradix_cache.py
+index f6cfca8b6..cae2d87f2 100644
+--- a/python/sglang/srt/mem_cache/hiradix_cache.py
++++ b/python/sglang/srt/mem_cache/hiradix_cache.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import heapq
+ import json
+ import logging
++import os
+ import threading
+ import time
+ from typing import TYPE_CHECKING, List, Optional
+@@ -52,7 +53,6 @@ class HiRadixCache(RadixCache):
+                 server_args.hicache_size,
+                 self.page_size,
+                 server_args.hicache_mem_layout,
+-                allocator_type=server_args.hicache_storage_backend,
+             )
+         elif isinstance(self.kv_cache, MLATokenToKVPool):
+             self.token_to_kv_pool_host = MLATokenToKVPoolHost(
+@@ -61,15 +61,12 @@ class HiRadixCache(RadixCache):
+                 server_args.hicache_size,
+                 self.page_size,
+                 server_args.hicache_mem_layout,
+-                allocator_type=server_args.hicache_storage_backend,
+             )
+         else:
+             raise ValueError(f"HiRadixCache only supports MHA and MLA yet")
+ 
+         self.tp_group = params.tp_cache_group
+         self.tp_world_size = torch.distributed.get_world_size(group=self.tp_group)
+-        self.pp_rank = params.pp_rank
+-        self.pp_size = params.pp_size
+         self.enable_storage = server_args.hicache_storage_backend is not None
+         self.enable_storage_metrics = self.enable_storage and params.enable_metrics
+ 
+@@ -105,8 +102,6 @@ class HiRadixCache(RadixCache):
+             prefetch_threshold=self.prefetch_threshold,
+             model_name=server_args.served_model_name,
+             storage_backend_extra_config=extra_config,
+-            pp_rank=self.pp_rank,
+-            pp_size=self.pp_size,
+         )
+         if self.enable_storage_metrics:
+             # TODO: support pp
+@@ -114,8 +109,6 @@ class HiRadixCache(RadixCache):
+                 "storage_backend": server_args.hicache_storage_backend,
+                 "tp_rank": self.cache_controller.tp_rank,
+                 "dp_rank": self.cache_controller.dp_rank,
+-                "pp_rank": self.cache_controller.pp_rank,
+-                "pp_size": self.cache_controller.pp_size,
+             }
+             self.storage_metrics_collector = StorageMetricsCollector(labels=labels)
+ 
+@@ -146,11 +139,31 @@ class HiRadixCache(RadixCache):
+         Returns:
+             tuple: (extra_config_dict, prefetch_threshold, prefetch_timeout_base, prefetch_timeout_per_ki_token, hicache_storage_pass_prefix_keys)
+         """
+-        # Parse extra config JSON if provided
++        # Parse extra config if provided. Extra config can be a JSON string or a json/toml/yaml file path prefixed with "@".
+         extra_config = {}
+         if storage_backend_extra_config:
+             try:
+-                extra_config = json.loads(storage_backend_extra_config)
++                if storage_backend_extra_config.startswith("@"):
++                    # Read config from a json/toml/yaml file
++                    path = storage_backend_extra_config[1:]
++                    ext = os.path.splitext(path)[1].lower()
++                    with open(path, "rb" if ext == ".toml" else "r") as f:
++                        if ext == ".json":
++                            extra_config = json.load(f)
++
++                        elif ext == ".toml":
++                            import tomllib
++                            extra_config = tomllib.load(f)
++
++                        elif ext in (".yaml", ".yml"):
++                            import yaml
++                            extra_config = yaml.safe_load(f)
++
++                        else:
++                            raise ValueError(f"Unsupported config file {path} (config format: {ext})")
++                else:
++                    # read config from JSON string
++                    extra_config = json.loads(storage_backend_extra_config)
+             except Exception as e:
+                 logger.error(f"Invalid backend extra config JSON: {e}")
+                 raise e
+diff --git a/python/sglang/srt/mem_cache/storage/nixl/README.md b/python/sglang/srt/mem_cache/storage/nixl/README.md
+index d33cd5d05..95ba1fd86 100644
+--- a/python/sglang/srt/mem_cache/storage/nixl/README.md
++++ b/python/sglang/srt/mem_cache/storage/nixl/README.md
+@@ -33,6 +33,7 @@ The main storage connector that provides:
+ ### NixlUtils
+ Consolidated utility classes:
+ - **NixlBackendSelection** - Handles backend selection and creation
++- **NixlBackendConfig** - Handles backend configuration
+ - **NixlRegistration** - Manages memory registration for tensors, files and objects
+ - **NixlFileManager** - Handles file system operations and NIXL tuple creation
+ 
+@@ -49,6 +50,19 @@ To customize the base directory for files, you can set the following environment
+ export SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR=/path/to/desired/dir
+ ```
+ 
++To use specific configurations for the backend,
++```bash
++python3 -m sglang.launch_server --model-path <model> --host <ip> --port <port> --page-size 64 --enable-hierarchical-cache --hicache-ratio 2 --hicache-size 64 --hicache-write-policy write_through --hicache-storage-backend nixl --hicache-storage-backend-extra-config "@config.nixl.toml"
++```
++where `config.nixl.toml` is a TOML file specifying the configurations for the backend. 
++
++Note: for quick experiments and troubleshooting, `--hicache-storage-backend-extra-config` can also work if provided with a JSON string and combined with `export SGLANG_HICACHE_NIXL_BACKEND_PLUGIN_TYPE=POSIX` (here `POSIX` can be any supported NIXL storage backend) which specify the backend configuration. For instance, the following command 
++```bash
++export SGLANG_HICACHE_NIXL_BACKEND_PLUGIN_TYPE=POSIX
++python3 -m sglang.launch_server --model-path <model> --host <ip> --port <port> --page-size 64 --enable-hierarchical-cache --hicache-ratio 2 --hicache-size 64 --hicache-write-policy write_through --hicache-storage-backend nixl --hicache-storage-backend-extra-config "{'use_uring': 'true'}"
++```
++forces to use URING for POSIX storage backend. In practice, a TOML file is preferred for specifying the configuration for NIXL storage backends.
++
+ Selection of any storage backend like 3FS requires availability of that library on the system, and the backend is selected based on the priority mentioned above.
+ 
+ ## Running Unit Tests
+diff --git a/python/sglang/srt/mem_cache/storage/nixl/hicache_nixl.py b/python/sglang/srt/mem_cache/storage/nixl/hicache_nixl.py
+index 8965acb4a..88262a212 100644
+--- a/python/sglang/srt/mem_cache/storage/nixl/hicache_nixl.py
++++ b/python/sglang/srt/mem_cache/storage/nixl/hicache_nixl.py
+@@ -8,7 +8,7 @@ import torch
+ 
+ from sglang.srt.mem_cache.hicache_storage import HiCacheStorage, HiCacheStorageConfig
+ 
+-from .nixl_utils import NixlBackendSelection, NixlFileManager, NixlRegistration
++from .nixl_utils import NixlBackendSelection, NixlFileManager, NixlRegistration, NixlBackendConfig
+ 
+ try:
+     from nixl._api import nixl_agent, nixl_agent_config
+@@ -29,9 +29,15 @@ class HiCacheNixl(HiCacheStorage):
+         self,
+         storage_config: HiCacheStorageConfig,
+         file_path: str = "/tmp/hicache_storage",
+-        plugin: str = "auto",
+     ):
+         """Initialize NIXL storage connector."""
++
++        # create nixlconfig from the --hicache-storage-backend-extra-config
++        nixlconfig = NixlBackendConfig(storage_config.extra_config)
++
++        # select the NIXL backend plugin from extra_config or environment variable
++        plugin = nixlconfig.get_specified_plugin()
++
+         # Might be better to be unified across HiCache backends and moved to HiCacheController
+         file_path = os.getenv("SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR", file_path)
+         self.file_manager = (
+@@ -57,7 +63,7 @@ class HiCacheNixl(HiCacheStorage):
+         self.agent_name = f"hicache_nixl_{str(uuid.uuid4())}"
+         self.agent = nixl_agent(self.agent_name, agent_config)
+ 
+-        self.backend_selector = NixlBackendSelection(plugin)
++        self.backend_selector = NixlBackendSelection(plugin, nixlconfig)
+         if not self.backend_selector.create_backend(self.agent):
+             raise RuntimeError("Failed to create NIXL backend")
+ 
+diff --git a/python/sglang/srt/mem_cache/storage/nixl/nixl.config.toml.sample b/python/sglang/srt/mem_cache/storage/nixl/nixl.config.toml.sample
+new file mode 100644
+index 000000000..1219672c2
+--- /dev/null
++++ b/python/sglang/srt/mem_cache/storage/nixl/nixl.config.toml.sample
+@@ -0,0 +1,38 @@
++[plugin.posix]
++# 
++# config for posix plugin, AIO > URING > POSIXAIO
++#
++use_uring = "true"
++# use_posix_aio = "true"
++# use_aio = "true"
++
++active = "true"   # needed to enable a specific plugin
++
++[plugin.gds]
++batch_pool_size = "16"
++batch_limit = "128"
++max_request_size = "16777216"  # 16 * 1024 * 1024
++
++[plugin.gds_mt]
++thread_count = "4"
++
++[plugin.3fs]
++mount_point = "/mnt/3fs"
++mem_config = "dram"  # valid values: dram, dram_zc, auto
++iopool_size = "64"  # range [64, 2^20]
++
++[plugin.obj]
++# bucket is mandatory 
++bucket = ""
++# client configurations
++num_threads = "4"
++endpoint_override = ""
++scheme = "http"       # valid values: http, https
++region = ""
++req_checksum = "required" # valid values: required, supported
++ca_bundle = ""
++# credential configurations
++access_key = ""
++secrete_key = ""
++session_token = ""
++use_virtual_addressing = "true"  # valid values: true, False
+diff --git a/python/sglang/srt/mem_cache/storage/nixl/nixl_utils.py b/python/sglang/srt/mem_cache/storage/nixl/nixl_utils.py
+index 7cabb9d7e..e32566276 100644
+--- a/python/sglang/srt/mem_cache/storage/nixl/nixl_utils.py
++++ b/python/sglang/srt/mem_cache/storage/nixl/nixl_utils.py
+@@ -6,6 +6,67 @@ import torch
+ 
+ logger = logging.getLogger(__name__)
+ 
++class NixlBackendConfig:
++    """Handles NIXL backend configurations"""
++
++    def __init__(self, config: Optional[dict[str, str]] = None):
++        """Initialize backend configuration.
++        Args:
++            config: configurations in a dictionary. This config comes from --hicache-storage-backend-extra-config
++
++            config can be in two forms:
++            1. fully qualified form (for all plugins, some of them are enabled, others not):
++                {'plugin': { 'posix': {...}, 'gds': {...}, ...}}
++            2. flat form (for a specific selected plugin), assuming all params apply to a selected plugin
++                {'param1': 'value1', 'param2': 'value2', ...}
++        """
++        self.config = config or {}
++
++    def get_specified_plugin(self) -> str:
++        """ decide which plugin to use: either config or SGLANG_HICACHE_NIXL_BACKEND_PLUGIN specifies the plugin, if not, use "auto" """
++
++        if "plugin" in self.config:
++            # fully qualified form: {'plugin': { 'posix': {...}, 'gds': {...}, ...}}
++            # choose the FIRST active plugin
++            for key, item in self.config["plugin"].items():
++                if item.get('active', False) in [True, 'true', 'True']:
++                    plugin = key.upper()
++                    break
++        else:
++            # config is empty, or in flat form {'param1': 'value1', 'param2': 'value2', ...}
++            plugin = os.getenv("SGLANG_HICACHE_NIXL_BACKEND_PLUGIN", "auto")
++
++        return plugin
++
++
++    def get_backend_initparams(self, backend_name) -> dict:
++        """Get initialization parameters from config of NIXL backend for backend creation.
++        Args:
++            backend_name: a specific backend's name (already converted "auto" into a specific backend name)
++
++        """
++
++        initparams = {}
++
++        # config can be in two forms:
++        if "plugin" in self.config:
++            # fully qualified form: {'plugin': { 'posix': {...}, 'gds': {...}, ...}}
++            if backend_name.lower() in self.config["plugin"]:
++                config_data = self.config["plugin"][backend_name.lower()]
++            else:
++                logger.debug(
++                    f"No specific config found for plugin {backend_name} in extra_config. Use default init params."
++                )
++                config_data = {}
++        else:
++            # flat form {'param1': 'value1', 'param2': 'value2', ...}
++            config_data = self.config
++
++        for key, value in config_data.items():
++            initparams[key] = value
++
++        return initparams
++
+ 
+ class NixlBackendSelection:
+     """Handles NIXL backend selection and creation."""
+@@ -15,7 +76,7 @@ class NixlBackendSelection:
+     # Priority order for File-based plugins in case of auto selection (add more as needed)
+     OBJ_PLUGINS = ["OBJ"]  # Based on Amazon S3 SDK
+ 
+-    def __init__(self, plugin: str = "auto"):
++    def __init__(self, plugin: str = "auto", nixlconfig: Optional[NixlBackendConfig] = None):
+         """Initialize backend selection.
+         Args:
+             plugin: Plugin to use (default "auto" selects best available).
+@@ -25,12 +86,14 @@ class NixlBackendSelection:
+         self.plugin = plugin
+         self.backend_name = None
+         self.mem_type = None
++        self.nixlconfig = nixlconfig
+ 
+     def set_bucket(self, bucket_name: str) -> None:
+         """Set AWS bucket name in environment variable."""
+         os.environ["AWS_DEFAULT_BUCKET"] = bucket_name
+         logger.debug(f"Set AWS bucket name to: {bucket_name}")
+ 
++
+     def create_backend(self, agent) -> bool:
+         """Create the appropriate NIXL backend based on configuration."""
+         try:
+@@ -60,17 +123,25 @@ class NixlBackendSelection:
+                 )
+                 return False
+ 
++            # obtain initparams for the backend from the NIXL config
++            initparams = self.nixlconfig.get_backend_initparams(self.backend_name) if self.nixlconfig else {}
++
+             # Create backend and set memory type
+-            if self.backend_name in self.OBJ_PLUGINS:
++            if self.backend_name in self.OBJ_PLUGINS and "bucket" not in initparams:
+                 bucket = os.environ.get("AWS_DEFAULT_BUCKET")
+                 if not bucket:
+                     logger.error(
+                         "AWS_DEFAULT_BUCKET environment variable must be set for object storage"
+                     )
+                     return False
+-                agent.create_backend(self.backend_name, {"bucket": bucket})
+-            else:
+-                agent.create_backend(self.backend_name)
++
++                initparams["bucket"] = bucket
++
++            # create backend using initialization parameters
++            agent.create_backend(self.backend_name, initparams)
++
++
++            logger.info(f'NixlBackendSelection.create_backend: backend_name {self.backend_name} initparams {initparams} customParams {agent.get_backend_params(self.backend_name)} supported plugins {plugin_list}')
+ 
+             self.mem_type = "OBJ" if self.backend_name in self.OBJ_PLUGINS else "FILE"
+             logger.debug(
+@@ -79,7 +150,7 @@ class NixlBackendSelection:
+             return True
+ 
+         except Exception as e:
+-            logger.error(f"Failed to create NIXL backend: {e}")
++            logger.error(f"Failed to create NIXL backend: {e}, backend_name {self.backend_name}, supported plugins {plugin_list} initparams {initparams}")
+             return False
+ 
+ 
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index ff34a0672..5fe77ffd5 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -3814,7 +3814,7 @@ class ServerArgs:
+             "--hicache-storage-backend-extra-config",
+             type=str,
+             default=ServerArgs.hicache_storage_backend_extra_config,
+-            help="A dictionary in JSON string format containing extra configuration for the storage backend.",
++            help="A dictionary in JSON string format, or a string starting with a leading '@' and a config file in JSON/YAML/TOML format, containing extra configuration for the storage backend.",
+         )
+         # LMCache
+         parser.add_argument(
+-- 
+2.52.0
+

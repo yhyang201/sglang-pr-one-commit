@@ -1,0 +1,30 @@
+From 3e7ade676e35aaa138f40d05edfc903e9bbf443f Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:51:47 +0000
+Subject: [PATCH] feat: Squash PR #16569 changes
+
+---
+ python/sglang/srt/models/nemotron_h.py | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/python/sglang/srt/models/nemotron_h.py b/python/sglang/srt/models/nemotron_h.py
+index 76fa41e3c..5c3732f7f 100644
+--- a/python/sglang/srt/models/nemotron_h.py
++++ b/python/sglang/srt/models/nemotron_h.py
+@@ -191,12 +191,11 @@ class NemotronHMoE(nn.Module):
+             self.shared_experts = None
+ 
+         if self.use_latent_moe:
+-            self.fc1_latent_proj = ColumnParallelLinear(
++            self.fc1_latent_proj = ReplicatedLinear(
+                 input_size=config.hidden_size,
+                 output_size=self.moe_hidden_size,
+                 bias=config.mlp_bias,
+                 quant_config=quant_config,
+-                gather_output=True,
+                 prefix=f"{prefix}.fc1_latent_proj",
+             )
+             self.fc2_latent_proj = ReplicatedLinear(
+-- 
+2.52.0
+

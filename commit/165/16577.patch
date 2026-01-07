@@ -1,0 +1,39 @@
+From a4342ae69dc4c6c83d860eb3b4a7a9c0f1039410 Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 05:51:15 +0000
+Subject: [PATCH] feat: Squash PR #16577 changes
+
+---
+ python/sglang/srt/utils/weight_checker.py | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/python/sglang/srt/utils/weight_checker.py b/python/sglang/srt/utils/weight_checker.py
+index ca5c2e08e..bc3422155 100644
+--- a/python/sglang/srt/utils/weight_checker.py
++++ b/python/sglang/srt/utils/weight_checker.py
+@@ -37,7 +37,7 @@ class WeightChecker:
+         ), f"should not have duplicated tensor name"
+ 
+     def _reset_tensors(self):
+-        for name, param in self._model_state():
++        for name, param in self._model_state(skip_buffers=True):
+             param.copy_(_random_like(param))
+ 
+     def _compare(self):
+@@ -48,10 +48,11 @@ class WeightChecker:
+             actual_tensors=_postprocess_tensors(dict(self._model_state())),
+         )
+ 
+-    def _model_state(self):
++    def _model_state(self, skip_buffers: bool = False):
+         # TODO: support EAGLE etc (e.g. yield from both main model and draft model)
+         yield from self._model_runner.model.named_parameters()
+-        yield from self._model_runner.model.named_buffers()
++        if not skip_buffers:
++            yield from self._model_runner.model.named_buffers()
+ 
+ 
+ def _check_tensors(
+-- 
+2.52.0
+
