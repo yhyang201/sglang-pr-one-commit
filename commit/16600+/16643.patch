@@ -1,0 +1,31 @@
+From cd5875d01990cda0a7d22f5336ce6f6160327edd Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 12:26:50 +0000
+Subject: [PATCH] feat: Squash PR #16643 changes
+
+---
+ python/sglang/srt/layers/quantization/w4afp8.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/python/sglang/srt/layers/quantization/w4afp8.py b/python/sglang/srt/layers/quantization/w4afp8.py
+index 1dc592957..6ec22bd28 100644
+--- a/python/sglang/srt/layers/quantization/w4afp8.py
++++ b/python/sglang/srt/layers/quantization/w4afp8.py
+@@ -83,12 +83,14 @@ class W4AFp8Config(QuantizationConfig):
+         linear_activation_scheme = "dynamic"
+         moe_activation_scheme = "static"
+         weight_block_size = [128, 128]
++        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
+         return cls(
+             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
+             is_checkpoint_w4afp8_serialized=is_checkpoint_w4afp8_serialized,
+             linear_activation_scheme=linear_activation_scheme,
+             moe_activation_scheme=moe_activation_scheme,
+             weight_block_size=weight_block_size,
++            ignored_layers=ignored_layers,
+         )
+ 
+     def get_quant_method(
+-- 
+2.52.0
+

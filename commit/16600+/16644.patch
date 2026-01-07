@@ -1,0 +1,381 @@
+From cee757505cbe5461b604afd3a4d154fce9c57d0a Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 12:26:47 +0000
+Subject: [PATCH] feat: Squash PR #16644 changes
+
+---
+ .../modules/deepseek_v2_attention_mla_npu.py  |  26 ++--
+ python/sglang/srt/layers/moe/ep_moe/layer.py  |  12 ++
+ python/sglang/srt/layers/quantization/fp8.py  | 128 ++++++++++++++++++
+ .../srt/layers/quantization/fp8_utils.py      |  30 ++++
+ python/sglang/srt/models/deepseek_v2.py       |  25 +++-
+ 5 files changed, 211 insertions(+), 10 deletions(-)
+
+diff --git a/python/sglang/srt/hardware_backend/npu/modules/deepseek_v2_attention_mla_npu.py b/python/sglang/srt/hardware_backend/npu/modules/deepseek_v2_attention_mla_npu.py
+index dc811fcca..88dd910e9 100644
+--- a/python/sglang/srt/hardware_backend/npu/modules/deepseek_v2_attention_mla_npu.py
++++ b/python/sglang/srt/hardware_backend/npu/modules/deepseek_v2_attention_mla_npu.py
+@@ -97,6 +97,9 @@ def forward_mha_prepare_npu(
+ 
+     q[..., m.qk_nope_head_dim :] = q_pe
+ 
++    if m.w_kc.dtype == torch.uint8:
++        kv_a = kv_a.squeeze(1).squeeze(1)
++
+     kv = m.kv_b_proj(kv_a)[0]
+     kv = kv.view(-1, m.num_local_heads, m.qk_nope_head_dim + m.v_head_dim)
+     k_nope = kv[..., : m.qk_nope_head_dim]
+@@ -188,7 +191,10 @@ def forward_mla_prepare_npu(
+         q_nope, q_pe = q.split([m.qk_nope_head_dim, m.qk_rope_head_dim], dim=-1)
+         k_pe = latent_cache[..., m.kv_lora_rank :].unsqueeze(1)
+ 
+-        q_nope_out = torch.bmm(q_nope.transpose(0, 1), m.w_kc)
++        if m.w_kc.dtype == torch.uint8:
++            q_nope_out = torch.ops.npu.fp8_w8a16_batch_matmul(q_nope.transpose(0, 1).contiguous(), m.w_kc, m.w_scale_k, "bf16")
++        else:
++            q_nope_out = torch.bmm(q_nope.transpose(0, 1), m.w_kc)
+ 
+         q_nope_out = q_nope_out.transpose(0, 1)
+ 
+@@ -247,14 +253,18 @@ def forward_mla_core_npu(
+ 
+     attn_output = attn_output.view(-1, m.num_local_heads, m.kv_lora_rank)
+ 
+-    attn_bmm_output = torch.empty(
+-        (attn_output.shape[0], m.num_local_heads, m.v_head_dim),
+-        dtype=attn_output.dtype,
+-        device=attn_output.device,
+-    )
++    if m.w_vc.dtype == torch.uint8:
++        attn_bmm_output = torch.ops.npu.fp8_w8a16_batch_matmul(attn_output.transpose(0, 1).contiguous(), m.w_vc, m.w_scale_v, "bf16")
++        attn_bmm_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
++    else:
++        attn_bmm_output = torch.empty(
++            (attn_output.shape[0], m.num_local_heads, m.v_head_dim),
++            dtype=attn_output.dtype,
++            device=attn_output.device,
++        )
+ 
+-    attn_output = attn_output.contiguous()
+-    torch.ops.npu.batch_matmul_transpose(attn_output, m.w_vc, attn_bmm_output)
++        attn_output = attn_output.contiguous()
++        torch.ops.npu.batch_matmul_transpose(attn_output, m.w_vc, attn_bmm_output)
+ 
+     attn_bmm_output = attn_bmm_output.reshape(-1, m.num_local_heads * m.v_head_dim)
+     output, _ = m.o_proj(attn_bmm_output)
+diff --git a/python/sglang/srt/layers/moe/ep_moe/layer.py b/python/sglang/srt/layers/moe/ep_moe/layer.py
+index 53c25b069..4d796a0be 100644
+--- a/python/sglang/srt/layers/moe/ep_moe/layer.py
++++ b/python/sglang/srt/layers/moe/ep_moe/layer.py
+@@ -371,6 +371,12 @@ class DeepEPMoE(FusedMoE):
+                 hidden_states = npu_fused_moe_without_routing_weights_bf16(
+                     self, hidden_states, group_list_type, group_list, output_dtype
+                 )
++            elif self.w13_weight.dtype == torch.uint8:
++                hidden_states = self.quant_method.apply_without_routing_weights(
++                    self,
++                    hidden_states,
++                    group_list,
++                )
+             else:
+                 input_quant = get_bool_env_var("DEEP_NORMAL_MODE_USE_INT8_QUANT")
+                 if not input_quant and not isinstance(
+@@ -405,6 +411,12 @@ class DeepEPMoE(FusedMoE):
+                 hidden_states = npu_fused_moe_without_routing_weights_bf16(
+                     self, hidden_states, group_list_type, group_list, output_dtype
+                 )
++            elif self.w13_weight.dtype == torch.uint8:
++                hidden_states = self.quant_method.apply_without_routing_weights(
++                    self,
++                    hidden_states,
++                    group_list,
++                )
+             else:
+                 hidden_states = self.quant_method.apply_without_routing_weights(
+                     self,
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index e80e818a0..5def9f210 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -45,6 +45,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
+     input_to_float8,
+     normalize_e4m3fn_to_e4m3fnuz,
+     requant_weight_ue8m0_inplace,
++    soft_fp8_blockfp8_gmm_npu,
+ )
+ from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
+ from sglang.srt.layers.quantization.marlin_utils_fp8 import (
+@@ -98,6 +99,10 @@ if _use_aiter or _use_hip_int4:
+     from aiter.fused_moe import fused_moe
+     from aiter.ops.shuffle import shuffle_weight
+ 
++if _is_npu: 
++    import torch_npu
++    import sgl_kernel_npu
++
+ 
+ ACTIVATION_SCHEMES = ["static", "dynamic"]
+ 
+@@ -393,6 +398,9 @@ class Fp8LinearMethod(LinearMethodBase):
+ 
+             layer.weight.data = weight.data
+             layer.weight_scale_inv.data = weight_scale.data
++            if _is_npu:
++                layer.weight.data = layer.weight.data.view(torch.uint8).transpose(-1,-2).contiguous()
++                layer.weight_scale_inv.data = layer.weight_scale_inv.data.transpose(-1,-2).contiguous()
+         else:
+             layer.weight = Parameter(layer.weight.data, requires_grad=False)
+ 
+@@ -803,6 +811,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+                     _is_cpu_amx_available
+                 ), "Fp8MoEMethod on CPU requires that CPU has AMX support"
+                 _amx_process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
++            elif _is_npu:
++                layer.w13_weight.data = layer.w13_weight.data.view(torch.uint8).transpose(1,2).contiguous()
++                layer.w2_weight.data = layer.w2_weight.data.view(torch.uint8).transpose(1,2).contiguous()
++                layer.w13_weight_scale_inv.data = layer.w13_weight_scale_inv.data.transpose(1, 2).contiguous()
++                layer.w2_weight_scale_inv.data = layer.w2_weight_scale_inv.data.transpose(1, 2).contiguous()
+             else:
+                 # For fp8 moe run with deepgemm, the expert weights and scales need be requantized to ue8m0
+                 from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
+@@ -1124,6 +1137,101 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+         else:
+             # TODO(cwan): refactor other backends
+             pass
++    
++    # fusedmoe
++    def npu_fused_experts_fp8(
++        self,
++        hidden_states: torch.Tensor,
++        w13: torch.Tensor,
++        w13_weight_scale_inv: torch.Tensor,
++        w2: torch.Tensor,
++        w2_weight_scale_inv: torch.Tensor,
++        topk_weights: torch.Tensor,
++        topk_ids: torch.Tensor,
++        top_k: int,
++        **kwargs,
++    ):
++        original_shape = hidden_states.shape
++        original_dtype = hidden_states.dtype
++        scale_dtype = original_dtype if original_dtype == torch.bfloat16 else torch.float32
++        if len(original_shape) == 3:
++            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
++        num_tokens = hidden_states.shape[0]
++        num_experts = w13.shape[0]
++        row_idx_len = num_tokens * top_k
++        row_idx = (
++            torch.arange(0, row_idx_len, dtype=torch.int32, device=topk_weights.device)
++            .view(top_k, -1)
++            .permute(1, 0)
++            .contiguous()
++        )
++        hidden_states, expanded_row_idx, expanded_expert_idx = (
++            torch_npu.npu_moe_init_routing(
++                hidden_states, row_idx=row_idx, expert_idx=topk_ids, active_num=num_tokens
++            )
++        )
++        expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
++            expanded_expert_idx, num_experts
++        )
++        expert_tokens = expert_tokens.to(torch.int64)
++        # gmm1: gate_up_proj
++        hidden_states = soft_fp8_blockfp8_gmm_npu(
++            input = hidden_states,
++            weight=w13,
++            weight_scale=w13_weight_scale_inv,
++            group_list=expert_tokens,
++        )
++
++        # act_fn: swiglu
++        hidden_states = torch_npu.npu_swiglu(hidden_states)
++        # gmm2: down_proj
++        hidden_states = soft_fp8_blockfp8_gmm_npu(
++            input = hidden_states,
++            weight=w2,
++            weight_scale=w2_weight_scale_inv,
++            group_list=expert_tokens,
++        )
++
++        final_hidden_states = torch_npu.npu_moe_finalize_routing(
++            hidden_states,
++            skip1=None,
++            skip2=None,
++            bias=None,
++            scales=topk_weights,
++            expanded_src_to_dst_row=expanded_row_idx,
++            export_for_source_row=topk_ids,
++        )
++        if len(original_shape) == 3:
++            final_hidden_states = final_hidden_states.view(original_shape)
++        return final_hidden_states
++    
++    # deepep
++    def apply_without_routing_weights(
++            self,
++            layer,
++            hidden_states,
++            group_list,
++        ):
++        expert_tokens = group_list.cumsum(dim=0).to(torch.int64)
++        hidden_states = soft_fp8_blockfp8_gmm_npu(
++            input=hidden_states,
++            weight=layer.w13_weight,
++            weight_scale=layer.w13_weight_scale_inv,
++            group_list=expert_tokens,
++        )
++
++        # act_fn: swiglu
++        hidden_states = torch_npu.npu_swiglu(hidden_states)
++
++        # gmm2: down_proj
++        hidden_states = soft_fp8_blockfp8_gmm_npu(
++            input=hidden_states,
++            weight=layer.w2_weight,
++            weight_scale=layer.w2_weight_scale_inv,
++            group_list=expert_tokens,
++        )
++
++        return hidden_states
+ 
+     def apply(
+         self,
+@@ -1136,6 +1244,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+         x = dispatch_output.hidden_states
+         moe_runner_config = self.moe_runner_config
+ 
++        if _is_npu:
++            topk_output = dispatch_output.topk_output
++
++            topk_weights, topk_ids, _ = topk_output
++            topk_ids = topk_ids.to(torch.int32)
++            topk_weights = topk_weights.to(x.dtype)
++
++            output = self.npu_fused_experts_fp8(
++                hidden_states = x,
++                w13 = layer.w13_weight,
++                w13_weight_scale_inv = layer.w13_weight_scale_inv,
++                w2 = layer.w2_weight,
++                w2_weight_scale_inv = layer.w2_weight_scale_inv,
++                topk_weights = topk_weights,
++                topk_ids =  topk_ids,
++                top_k = topk_ids.shape[1],
++            )
++
++            return StandardCombineInput(hidden_states=output)
++
+         if use_intel_amx_backend(layer):
+             from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
+ 
+diff --git a/python/sglang/srt/layers/quantization/fp8_utils.py b/python/sglang/srt/layers/quantization/fp8_utils.py
+index e7548dbce..00fbed3f2 100644
+--- a/python/sglang/srt/layers/quantization/fp8_utils.py
++++ b/python/sglang/srt/layers/quantization/fp8_utils.py
+@@ -43,6 +43,7 @@ from sglang.srt.utils import (
+     is_cuda,
+     is_flashinfer_available,
+     is_hip,
++    is_npu,
+     is_sm90_supported,
+     offloader,
+ )
+@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
+ _is_hip = is_hip()
+ _is_cuda = is_cuda()
+ _is_fp8_fnuz = is_fp8_fnuz()
++_is_npu = is_npu()
+ 
+ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+ 
+@@ -74,6 +76,10 @@ if _is_cuda:
+         N = mat_b.shape[-1]
+         return mat_a.new_empty((M, N), dtype=out_dtype)
+ 
++if _is_npu: 
++    import torch_npu
++    import sgl_kernel_npu
++
+ 
+ use_vllm_cutlass_w8a8_fp8_kernel = get_bool_env_var("USE_VLLM_CUTLASS_W8A8_FP8_KERNEL")
+ use_triton_w8a8_fp8_kernel = get_bool_env_var("USE_TRITON_W8A8_FP8_KERNEL")
+@@ -258,6 +264,8 @@ def _dispatch_auto_backend() -> Callable:
+         return cutlass_w8a8_block_fp8_linear_with_fallback
+     elif _use_aiter:
+         return aiter_w8a8_block_fp8_linear
++    elif _is_npu:
++        return soft_fp8_blockfp8_matmul_npu
+     else:
+         return triton_w8a8_block_fp8_linear
+ 
+@@ -1165,3 +1173,25 @@ def validate_fp8_block_shape(
+                     f"{output_partition_size} is not divisible by "
+                     f"weight quantization block_n = {block_n}."
+                 )
++
++
++def soft_fp8_blockfp8_matmul_npu(
++    input: torch.Tensor,
++    weight: torch.Tensor,
++    block_size: List[int],
++    weight_scale: torch.Tensor,
++    input_scale: Optional[torch.Tensor] = None,
++    bias: Optional[torch.Tensor] = None,
++) -> torch.Tensor:
++    output = torch.ops.npu.fp8_w8a16_matmul(input, weight, weight_scale, "bf16")
++    return output
++
++
++def soft_fp8_blockfp8_gmm_npu(
++    input: torch.Tensor,
++    weight: torch.Tensor,
++    weight_scale: torch.Tensor,
++    group_list: torch.Tensor,
++) -> torch.Tensor:
++    output = torch.ops.npu.fp8_w8a16_grouped_matmul(input, weight, weight_scale, group_list, "bf16")
++    return output
+diff --git a/python/sglang/srt/models/deepseek_v2.py b/python/sglang/srt/models/deepseek_v2.py
+index ed8cc7ada..476f5af46 100644
+--- a/python/sglang/srt/models/deepseek_v2.py
++++ b/python/sglang/srt/models/deepseek_v2.py
+@@ -3538,6 +3538,12 @@ class DeepseekV2ForCausalLM(nn.Module):
+                                 weight_block_size,
+                                 torch.bfloat16,
+                             )
++                    elif (
++                        _is_npu
++                        and weight_block_size[0] == 128
++                        and weight_block_size[1] == 128
++                    ):
++                        block_scale = weight_scale
+                     else:
+                         w, scale = block_quant_to_tensor_quant(
+                             weight, weight_scale, weight_block_size
+@@ -3586,8 +3592,23 @@ class DeepseekV2ForCausalLM(nn.Module):
+                 w_kc, self_attn.w_scale_k, w_vc, self_attn.w_scale_v = (
+                     quark_post_load_weights(self_attn, w, "mxfp4")
+                 )
+-
+-            if not use_deep_gemm_bmm:
++            if _is_npu:
++                num_tiles_k = self_attn.qk_nope_head_dim // weight_block_size[1]
++                num_tiles_n = self_attn.v_head_dim // weight_block_size[0]
++                ws_kc, ws_vc = block_scale.unflatten(
++                    0, (-1, (num_tiles_k + num_tiles_n))
++                ).split([num_tiles_k, num_tiles_n], dim=1)
++                self_attn.w_scale_k = bind_or_assign(
++                    self_attn.w_scale_k, ws_kc.contiguous()
++                )
++                self_attn.w_scale_v = bind_or_assign(
++                    self_attn.w_scale_v, ws_vc.transpose(1, 2).contiguous()
++                )
++                self_attn.w_kc = bind_or_assign(
++                    self_attn.w_kc, w_kc.view(torch.uint8).contiguous()
++                )
++                self_attn.w_vc = bind_or_assign(self_attn.w_vc, w_vc.view(torch.uint8).transpose(1, 2).contiguous())
++            elif not use_deep_gemm_bmm:
+                 self_attn.w_kc = bind_or_assign(
+                     self_attn.w_kc, w_kc.transpose(1, 2).contiguous().transpose(1, 2)
+                 )
+-- 
+2.52.0
+

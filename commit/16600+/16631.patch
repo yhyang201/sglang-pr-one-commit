@@ -1,0 +1,25 @@
+From 3d166242149f072d44a19c7fda690f190138dcd5 Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 12:27:26 +0000
+Subject: [PATCH] feat: Squash PR #16631 changes
+
+---
+ test/registered/backends/test_torch_compile.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/test/registered/backends/test_torch_compile.py b/test/registered/backends/test_torch_compile.py
+index 5ba812bd9..0b3acda01 100644
+--- a/test/registered/backends/test_torch_compile.py
++++ b/test/registered/backends/test_torch_compile.py
+@@ -17,7 +17,7 @@ from sglang.test.test_utils import (
+ )
+ 
+ register_cuda_ci(est_time=190, suite="stage-b-test-small-1-gpu")
+-register_amd_ci(est_time=169, suite="stage-b-test-small-1-gpu")
++register_amd_ci(est_time=993, suite="stage-b-test-small-1-gpu")
+ 
+ 
+ class TestTorchCompile(CustomTestCase):
+-- 
+2.52.0
+

@@ -1,0 +1,47 @@
+From 5e84fe2c8418c77e9b33945c7dcb11a89282c26c Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Wed, 7 Jan 2026 12:27:22 +0000
+Subject: [PATCH] feat: Squash PR #16633 changes
+
+---
+ sgl-model-gateway/src/routers/router_manager.rs | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/sgl-model-gateway/src/routers/router_manager.rs b/sgl-model-gateway/src/routers/router_manager.rs
+index 95bc2a6ad..01014e2dd 100644
+--- a/sgl-model-gateway/src/routers/router_manager.rs
++++ b/sgl-model-gateway/src/routers/router_manager.rs
+@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
+ use crate::{
+     app_context::AppContext,
+     config::RoutingMode,
+-    core::{ConnectionMode, WorkerRegistry, WorkerType},
++    core::{ConnectionMode, RuntimeType, WorkerRegistry, WorkerType},
+     protocols::{
+         chat::ChatCompletionRequest,
+         classify::ClassifyRequest,
+@@ -281,7 +281,7 @@ impl RouterManager {
+         let workers = self.worker_registry.get_by_model(model_id);
+ 
+         // Find the best router ID based on worker capabilities
+-        // Priority: grpc-pd > http-pd > grpc-regular > http-regular
++        // Priority: external (OpenAI) > grpc-pd > http-pd > grpc-regular > http-regular
+         let best_router_id = workers
+             .iter()
+             .map(|w| {
+@@ -290,6 +290,12 @@ impl RouterManager {
+                     WorkerType::Prefill { .. } | WorkerType::Decode
+                 );
+                 let is_grpc = matches!(w.connection_mode(), ConnectionMode::Grpc { .. });
++                let is_external = matches!(w.metadata().runtime_type, RuntimeType::External);
++
++                if is_external {
++                    // External workers should be routed via OpenAI-compatible router
++                    return (4, &router_ids::HTTP_OPENAI);
++                }
+ 
+                 match (is_grpc, is_pd) {
+                     (true, true) => (3, &router_ids::GRPC_PD),
+-- 
+2.52.0
+
