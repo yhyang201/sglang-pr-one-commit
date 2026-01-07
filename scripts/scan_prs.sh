@@ -16,7 +16,7 @@ PR_LIST=$(gh pr list --repo "$REPO" --state all --limit "$LIMIT" --json number -
 
 for PR_ID in $PR_LIST; do
     DIR_INDEX=$((PR_ID / 100))
-    PATCH_FILE="commit/${DIR_INDEX}/${PR_ID}.patch"
+    PATCH_FILE="commit/${DIR_INDEX}00+/${PR_ID}.patch"
     
     if [ ! -f "$PATCH_FILE" ]; then
         echo "Processing new PR #${PR_ID}..."

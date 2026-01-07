@@ -7,7 +7,7 @@ This project fetches Pull Requests from [sgl-project/sglang](https://github.com/
 - Automate PR fetching
 - Squash commits
 - Export patch files
-- Archive in `commit/[pr_number/100]/pr_number.patch` structure
+- Archive in `commit/[pr_number/100]00+/pr_number.patch` structure
 
 ## Usage
 
