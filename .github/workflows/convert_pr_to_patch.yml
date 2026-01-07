@@ -1,0 +1,51 @@
+name: Update PR Patches
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      pr_id:
+        description: 'Specific PR Number (Optional)'
+        required: false
+        type: string
+
+jobs:
+  update-patches:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Process PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.pr_id }}" ]; then
+            echo "Processing specific PR #${{ inputs.pr_id }}"
+            ./scripts/process_pr.sh "${{ inputs.pr_id }}"
+          else
+            echo "Scanning for new PRs..."
+            ./scripts/scan_prs.sh
+          fi
+
+      - name: Commit and Push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add commit/
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: Update PR patches"
+            git push
+          fi
