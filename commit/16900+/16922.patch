@@ -1,0 +1,321 @@
+From f23224de938bc4ad9bdf7fa46abf951a01cee8f7 Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Mon, 12 Jan 2026 12:11:24 +0000
+Subject: [PATCH] feat: Squash PR #16922 changes
+
+---
+ .../configs/sample/sampling_params.py         |  6 +-
+ .../runtime/entrypoints/openai/image_api.py   |  2 +-
+ .../runtime/entrypoints/openai/protocol.py    |  2 +-
+ .../runtime/entrypoints/openai/video_api.py   |  4 +-
+ .../runtime/managers/scheduler.py             | 90 +++++++++++++++----
+ .../runtime/pipelines_core/schedule_batch.py  | 39 ++++++--
+ 6 files changed, 113 insertions(+), 30 deletions(-)
+
+diff --git a/python/sglang/multimodal_gen/configs/sample/sampling_params.py b/python/sglang/multimodal_gen/configs/sample/sampling_params.py
+index a3145dffc..dfb7bbebf 100644
+--- a/python/sglang/multimodal_gen/configs/sample/sampling_params.py
++++ b/python/sglang/multimodal_gen/configs/sample/sampling_params.py
+@@ -100,11 +100,11 @@ class SamplingParams:
+ 
+     # Batch info
+     num_outputs_per_prompt: int = 1
+-    seed: int = 1024
++    seed: int = 42
+     generator_device: str = "cuda"  # Device for random generator: "cuda" or "cpu"
+ 
+     # Original dimensions (before VAE scaling)
+-    num_frames: int = 125
++    num_frames: int = 1  # Default for image models
+     num_frames_round_down: bool = (
+         False  # Whether to round down num_frames if it's not divisible by num_gpus
+     )
+@@ -122,7 +122,7 @@ class SamplingParams:
+ 
+     # Denoising parameters
+     num_inference_steps: int = None
+-    guidance_scale: float = None
++    guidance_scale: float = 1.0
+     guidance_scale_2: float = None
+     true_cfg_scale: float = None  # for CFG vs guidance distillation (e.g., QwenImage)
+     guidance_rescale: float = 0.0
+diff --git a/python/sglang/multimodal_gen/runtime/entrypoints/openai/image_api.py b/python/sglang/multimodal_gen/runtime/entrypoints/openai/image_api.py
+index 0aa2a3475..8b4518b99 100644
+--- a/python/sglang/multimodal_gen/runtime/entrypoints/openai/image_api.py
++++ b/python/sglang/multimodal_gen/runtime/entrypoints/openai/image_api.py
+@@ -84,9 +84,9 @@ def _build_sampling_params_from_request(
+         output_file_name=f"{request_id}.{ext}",
+         seed=seed,
+         generator_device=generator_device,
+-        guidance_scale=guidance_scale,
+         num_inference_steps=num_inference_steps,
+         enable_teacache=enable_teacache,
++        **({"guidance_scale": guidance_scale} if guidance_scale is not None else {}),
+         **({"negative_prompt": negative_prompt} if negative_prompt is not None else {}),
+         **({"true_cfg_scale": true_cfg_scale} if true_cfg_scale is not None else {}),
+     )
+diff --git a/python/sglang/multimodal_gen/runtime/entrypoints/openai/protocol.py b/python/sglang/multimodal_gen/runtime/entrypoints/openai/protocol.py
+index 165c41606..b6331cf6e 100644
+--- a/python/sglang/multimodal_gen/runtime/entrypoints/openai/protocol.py
++++ b/python/sglang/multimodal_gen/runtime/entrypoints/openai/protocol.py
+@@ -72,7 +72,7 @@ class VideoGenerationsRequest(BaseModel):
+     generator_device: Optional[str] = "cuda"
+     # SGLang extensions
+     num_inference_steps: Optional[int] = None
+-    guidance_scale: Optional[float] = None
++    guidance_scale: Optional[float] = 1.0
+     guidance_scale_2: Optional[float] = None
+     true_cfg_scale: Optional[float] = (
+         None  # for CFG vs guidance distillation (e.g., QwenImage)
+diff --git a/python/sglang/multimodal_gen/runtime/entrypoints/openai/video_api.py b/python/sglang/multimodal_gen/runtime/entrypoints/openai/video_api.py
+index bd571b09d..a4e9a6e27 100644
+--- a/python/sglang/multimodal_gen/runtime/entrypoints/openai/video_api.py
++++ b/python/sglang/multimodal_gen/runtime/entrypoints/openai/video_api.py
+@@ -213,9 +213,11 @@ async def create_video(
+             seed=seed,
+             generator_device=generator_device,
+             negative_prompt=negative_prompt,
+-            guidance_scale=guidance_scale,
+             num_inference_steps=num_inference_steps,
+             enable_teacache=enable_teacache,
++            **(
++                {"guidance_scale": guidance_scale} if guidance_scale is not None else {}
++            ),
+         )
+     else:
+         try:
+diff --git a/python/sglang/multimodal_gen/runtime/managers/scheduler.py b/python/sglang/multimodal_gen/runtime/managers/scheduler.py
+index af579840b..04bee16c6 100644
+--- a/python/sglang/multimodal_gen/runtime/managers/scheduler.py
++++ b/python/sglang/multimodal_gen/runtime/managers/scheduler.py
+@@ -1,6 +1,8 @@
+ # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
+ 
+ # SPDX-License-Identifier: Apache-2.0
++import asyncio
++import os
+ import pickle
+ from collections import deque
+ from copy import deepcopy
+@@ -8,12 +10,14 @@ from typing import Any, List
+ 
+ import zmq
+ 
++from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType
+ from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
+     ListLorasReq,
+     MergeLoraWeightsReq,
+     SetLoraReq,
+     UnmergeLoraWeightsReq,
+     _parse_size,
++    save_image_to_path,
+ )
+ from sglang.multimodal_gen.runtime.managers.gpu_worker import GPUWorker
+ from sglang.multimodal_gen.runtime.pipelines_core import Req
+@@ -29,6 +33,8 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import GREEN, RESET, init
+ 
+ logger = init_logger(__name__)
+ 
++MINIMUM_PICTURE_BASE64_FOR_WARMUP = "data:image/jpg;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAbUlEQVRYhe3VsQ2AMAxE0Y/lIgNQULD/OqyCMgCihCKSG4yRuKuiNH6JLsoEbMACOGBcua9HOR7Y6w6swBwMy0qLTpkeI77qdEBpBFAHBBDAGH8WrwJKI4AAegUCfAKgEgpQDvh3CR3oQCuav58qlAw73kKCSgAAAABJRU5ErkJggg=="
++
+ 
+ class Scheduler:
+     """
+@@ -88,6 +94,9 @@ class Scheduler:
+ 
+         # whether we've send the necessary warmup reqs
+         self.warmed_up = False
++        # warmup progress tracking
++        self._warmup_total = 0
++        self._warmup_processed = 0
+ 
+         self.prepare_server_warmup_reqs()
+ 
+@@ -115,9 +124,15 @@ class Scheduler:
+         return self.worker.list_loras()
+ 
+     def _handle_generation(self, reqs: List[Req]):
+-        has_warmup = any(req.is_warmup for req in reqs)
+-        if has_warmup:
+-            logger.info("Processing warmup req...")
++        warmup_reqs = [req for req in reqs if req.is_warmup]
++        if warmup_reqs:
++            self._warmup_processed += len(warmup_reqs)
++            if self._warmup_total > 0:
++                logger.info(
++                    f"Processing warmup req... ({self._warmup_processed}/{self._warmup_total})"
++                )
++            else:
++                logger.info("Processing warmup req...")
+         return self.worker.execute_forward(reqs)
+ 
+     def return_result(
+@@ -149,15 +164,45 @@ class Scheduler:
+             and self.server_args.warmup_resolutions is not None
+         ):
+             # insert warmup reqs constructed with each warmup-resolution
++            self._warmup_total = len(self.server_args.warmup_resolutions)
++            self._warmup_processed = 0
++
+             for resolution in self.server_args.warmup_resolutions:
+                 width, height = _parse_size(resolution)
+-                req = Req(
+-                    data_type=self.server_args.pipeline_config.task_type.data_type(),
+-                    width=width,
+-                    height=height,
+-                    prompt="",
+-                    is_warmup=True,
+-                )
++                task_type = self.server_args.pipeline_config.task_type
++
++                if task_type in (
++                    ModelTaskType.I2I,
++                    ModelTaskType.TI2I,
++                    ModelTaskType.I2V,
++                    ModelTaskType.TI2V,
++                ):
++                    uploads_dir = os.path.join("outputs", "uploads")
++                    os.makedirs(uploads_dir, exist_ok=True)
++                    input_path = asyncio.run(
++                        save_image_to_path(
++                            MINIMUM_PICTURE_BASE64_FOR_WARMUP,
++                            os.path.join(uploads_dir, "warmup_image.jpg"),
++                        )
++                    )
++                    req = Req(
++                        data_type=task_type.data_type(),
++                        width=width,
++                        height=height,
++                        prompt="",
++                        negative_prompt="",
++                        image_path=[input_path],
++                        is_warmup=True,
++                    )
++                else:
++                    req = Req(
++                        data_type=task_type.data_type(),
++                        width=width,
++                        height=height,
++                        prompt="",
++                        is_warmup=True,
++                    )
++
+                 self.waiting_queue.append((None, req))
+             # if server is warmed-up, set this flag to avoid req-based warmup
+             self.warmed_up = True
+@@ -182,7 +227,9 @@ class Scheduler:
+             warmup_req.extra["cache_dit_num_inference_steps"] = req.num_inference_steps
+             warmup_req.num_inference_steps = 1
+             recv_reqs.insert(0, (identity, warmup_req))
+-            logger.info("Server warming up....")
++            self._warmup_total = 1
++            self._warmup_processed = 1
++            logger.info("Processing warmup req... (1/1)")
+             self.warmed_up = True
+         return recv_reqs
+ 
+@@ -313,12 +360,23 @@ class Scheduler:
+                 )
+                 if is_warmup:
+                     if output_batch.error is None:
+-                        logger.info(
+-                            f"Warmup req processed in {GREEN}%.2f{RESET} seconds",
+-                            output_batch.timings.total_duration_s,
+-                        )
++                        if self._warmup_total > 0:
++                            logger.info(
++                                f"Warmup req ({self._warmup_processed}/{self._warmup_total}) processed in {GREEN}%.2f{RESET} seconds",
++                                output_batch.timings.total_duration_s,
++                            )
++                        else:
++                            logger.info(
++                                f"Warmup req processed in {GREEN}%.2f{RESET} seconds",
++                                output_batch.timings.total_duration_s,
++                            )
+                     else:
+-                        logger.info(f"Warmup req processing failed")
++                        if self._warmup_total > 0:
++                            logger.info(
++                                f"Warmup req ({self._warmup_processed}/{self._warmup_total}) processing failed"
++                            )
++                        else:
++                            logger.info(f"Warmup req processing failed")
+ 
+                 # TODO: Support sending back to multiple identities if batched
+                 self.return_result(output_batch, identities[0], is_warmup=is_warmup)
+diff --git a/python/sglang/multimodal_gen/runtime/pipelines_core/schedule_batch.py b/python/sglang/multimodal_gen/runtime/pipelines_core/schedule_batch.py
+index b3824d9be..28a150982 100644
+--- a/python/sglang/multimodal_gen/runtime/pipelines_core/schedule_batch.py
++++ b/python/sglang/multimodal_gen/runtime/pipelines_core/schedule_batch.py
+@@ -13,7 +13,7 @@ from __future__ import annotations
+ 
+ import os
+ import pprint
+-from dataclasses import asdict, dataclass, field
++from dataclasses import MISSING, asdict, dataclass, field, fields
+ from typing import Any, Optional
+ 
+ import PIL.Image
+@@ -31,8 +31,10 @@ from sglang.multimodal_gen.utils import align_to
+ 
+ logger = init_logger(__name__)
+ 
++SAMPLING_PARAMS_FIELDS = {f.name for f in fields(SamplingParams)}
+ 
+-@dataclass
++
++@dataclass(init=False)
+ class Req:
+     """
+     Complete state passed through the pipeline execution.
+@@ -137,6 +139,22 @@ class Req:
+     # results
+     output: torch.Tensor | None = None
+ 
++    def __init__(self, **kwargs):
++        # Initialize dataclass fields
++        for name, field in self.__class__.__dataclass_fields__.items():
++            if name in kwargs:
++                object.__setattr__(self, name, kwargs.pop(name))
++            elif field.default is not MISSING:
++                object.__setattr__(self, name, field.default)
++            elif field.default_factory is not MISSING:
++                object.__setattr__(self, name, field.default_factory())
++
++        for name, value in kwargs.items():
++            setattr(self, name, value)
++
++        if hasattr(self, "__post_init__"):
++            self.__post_init__()
++
+     def __getattr__(self, name: str) -> Any:
+         """
+         Delegate attribute access to sampling_params if not found in Req.
+@@ -172,13 +190,18 @@ class Req:
+ 
+         try:
+             sampling_params = object.__getattribute__(self, "sampling_params")
+-            if sampling_params is not None and hasattr(sampling_params, name):
+-                setattr(sampling_params, name, value)
+-                return
+         except AttributeError:
+-            # This can happen if `sampling_params` is not set yet. We'll fall through
+-            # to setting the attribute on `self`.
+-            pass
++            sampling_params = None
++
++        if sampling_params is not None and hasattr(sampling_params, name):
++            setattr(sampling_params, name, value)
++            return
++
++        if sampling_params is None and name in SAMPLING_PARAMS_FIELDS:
++            new_sp = SamplingParams()
++            object.__setattr__(self, "sampling_params", new_sp)
++            setattr(new_sp, name, value)
++            return
+ 
+         object.__setattr__(self, name, value)
+ 
+-- 
+2.52.0
+
