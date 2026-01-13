@@ -1,0 +1,1139 @@
+From 62cd7993e111adc9fc92367be8ba00782541d100 Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Tue, 13 Jan 2026 02:28:05 +0000
+Subject: [PATCH] feat: Squash PR #16983 changes
+
+---
+ benchmark/asr/README.md                       | 133 ++++
+ benchmark/asr/bench_sglang.py                 | 177 ++++++
+ python/sglang/srt/configs/model_config.py     |  21 +-
+ .../sglang/srt/managers/tokenizer_manager.py  |  12 +-
+ python/sglang/srt/models/whisper.py           | 592 ++++++++++++++++++
+ .../srt/multimodal/processors/whisper.py      |  71 +++
+ python/sglang/srt/parser/conversation.py      |  26 +
+ 7 files changed, 1027 insertions(+), 5 deletions(-)
+ create mode 100644 benchmark/asr/README.md
+ create mode 100644 benchmark/asr/bench_sglang.py
+ create mode 100644 python/sglang/srt/models/whisper.py
+ create mode 100644 python/sglang/srt/multimodal/processors/whisper.py
+
+diff --git a/benchmark/asr/README.md b/benchmark/asr/README.md
+new file mode 100644
+index 000000000..876e945ce
+--- /dev/null
++++ b/benchmark/asr/README.md
+@@ -0,0 +1,133 @@
++# ASR Benchmark
++
++This benchmark evaluates the performance and accuracy (Word Error Rate - WER) of Automatic Speech Recognition (ASR) models served via SGLang.
++
++## Supported Models
++
++- `openai/whisper-large-v3`
++- `openai/whisper-large-v3-turbo`
++- `openai/whisper-medium`
++- `openai/whisper-small`
++- `openai/whisper-base`
++- `openai/whisper-tiny`
++
++## Setup
++
++Install the required dependencies:
++
++```bash
++apt install ffmpeg
++pip install librosa soundfile datasets evaluate jiwer transformers openai torchcodec torch
++```
++
++## Running the Benchmark
++
++### 1. Start SGLang Server
++
++Launch the SGLang server with a Whisper model:
++
++```bash
++python -m sglang.launch_server --model-path openai/whisper-large-v3 --port 30000
++```
++
++### 2. Run the Benchmark Script
++
++Basic usage:
++
++```bash
++python bench_sglang.py --base-url http://localhost:30000 --model openai/whisper-large-v3 --n-examples 10
++```
++
++Run with higher concurrency and save results:
++
++```bash
++python bench_sglang.py \
++    --base-url http://localhost:30000 \
++    --model openai/whisper-large-v3 \
++    --concurrency 8 \
++    --n-examples 100 \
++    --output results.json \
++    --show-predictions
++```
++
++## Arguments
++
++| Argument | Description | Default |
++|----------|-------------|---------|
++| `--base-url` | SGLang server URL | `http://localhost:30000` |
++| `--model` | Model name on the server | `openai/whisper-large-v3` |
++| `--dataset` | HuggingFace dataset for evaluation | `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` |
++| `--split` | Dataset split to use | `validation` |
++| `--concurrency` | Number of concurrent requests | `4` |
++| `--n-examples` | Number of examples to process (`-1` for all) | `-1` |
++| `--output` | Path to save results as JSON | `None` |
++| `--show-predictions` | Display sample predictions | `False` |
++| `--print-n` | Number of samples to display | `5` |
++
++## Metrics
++
++The benchmark outputs:
++
++| Metric | Description |
++|--------|-------------|
++| **Total Requests** | Number of successful ASR requests processed |
++| **WER** | Word Error Rate (lower is better), computed using the `evaluate` library |
++| **Average Latency** | Mean time per request (seconds) |
++| **Median Latency** | 50th percentile latency (seconds) |
++| **95th Latency** | 95th percentile latency (seconds) |
++| **Throughput** | Requests processed per second |
++| **Token Throughput** | Output tokens per second |
++
++## Example Output
++
++```bash
++------------------------------
++Results for openai/whisper-large-v3:
++Total Requests: 511
++WER: 12.7931
++Average Latency: 3.1487s
++Median Latency: 2.8786s
++95th Latency: 6.9032s
++Throughput: 23.95 req/s
++Token Throughput: 446.40 tok/s
++Total Test Time: 21.3374s
++------------------------------
++
++==================== Sample Predictions ====================
++Sample 1:
++  REF: on the use of taxonomy i you know i think it is it is early days for us to to make any clear indications to the market about the proportion that would fall under that requirement
++  PRED: on the eu taxonomy i think it is early days for us to make any clear indications to the market about the proportion that would fall under that requirement
++----------------------------------------
++Sample 2:
++  REF: so within fiscal year 2021 say 120 a 100 depending on what the micro will do and next year it is not necessarily payable in q one is we will look at what the cash flows for 2022 look like
++  PRED: so within fiscal year 2021 say $120000 $100000 depending on what the macro will do and next year it is not necessarily payable in q one is we will look at what the cash flows for 2022 look like
++----------------------------------------
++Sample 3:
++  REF: we talked about 4.7 gigawatts
++  PRED: we talked about 4.7 gigawatts
++----------------------------------------
++Sample 4:
++  REF: and you know depending on that working capital build we will we will see what that yields
++  PRED: and depending on that working capital build we will see what that yields what
++----------------------------------------
++Sample 5:
++  REF: so on on sinopec what we have agreed with sinopec way back then is that free cash flows after paying all capexs are distributed out 30 70%
++  PRED: so on sinopec what we have agreed with sinopec way back then is that free cash flows after paying all capexes are distributed out 30% 70%
++```
++
++## Notes
++
++- Audio samples longer than 30 seconds are automatically filtered out (Whisper limitation)
++- The benchmark performs a warmup request before measuring performance
++- Results are normalized using the model's tokenizer when available
++
++## Troubleshooting
++
++**Server connection refused**
++- Ensure the SGLang server is running and accessible at the specified `--base-url`
++- Check that the port is not blocked by a firewall
++
++**Out of memory errors**
++- Reduce `--concurrency` to lower GPU memory usage
++- Use a smaller Whisper model variant
++
+diff --git a/benchmark/asr/bench_sglang.py b/benchmark/asr/bench_sglang.py
+new file mode 100644
+index 000000000..1877da8f1
+--- /dev/null
++++ b/benchmark/asr/bench_sglang.py
+@@ -0,0 +1,177 @@
++import asyncio
++import io
++import time
++import base64
++import argparse
++import os
++from statistics import mean, median
++
++import librosa
++import soundfile
++import numpy as np
++from datasets import load_dataset
++from evaluate import load
++from transformers import AutoTokenizer
++from openai import AsyncOpenAI
++
++def to_bytes(y, sr):
++    buffer = io.BytesIO()
++    soundfile.write(buffer, y, sr, format="WAV")
++    buffer.seek(0)
++    return buffer
++
++async def run_asr_sglang(client, model_name, y, sr):
++    # Convert audio to base64 for sGLang multimodal chat completion
++    with to_bytes(y, sr) as f:
++        audio_bytes = f.read()
++        audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
++    
++    start_time = time.perf_counter()
++    # sGLang uses chat completions for audio/ASR models
++    # We use the data URL format for audio
++    response = await client.chat.completions.create(
++        model=model_name,
++        messages=[{
++            "role": "user",
++            "content": [
++                {
++                    "type": "audio_url",
++                    "audio_url": {"url": f"data:audio/wav;base64,{audio_base64}"}
++                }
++            ]
++        }],
++        temperature=0.0,
++    )
++    end_time = time.perf_counter()
++    
++    asr_text = response.choices[0].message.content
++    latency = end_time - start_time
++    return latency, asr_text
++
++async def bound_asr(sem, client, model_name, tokenizer, audio, reference):
++    async with sem:
++        try:
++            latency, text = await run_asr_sglang(client, model_name, *audio)
++            
++            # Calculate tokens for throughput metrics
++            num_output_tokens = len(tokenizer(text, add_special_tokens=False).input_ids)
++            
++            # Normalize for WER evaluation
++            # Whisper tokenizer has a normalize method
++            if hasattr(tokenizer, "normalize"):
++                out = tokenizer.normalize(text)
++                ref = tokenizer.normalize(reference)
++            else:
++                out = text.lower().strip()
++                ref = reference.lower().strip()
++                
++            return latency, num_output_tokens, out, ref
++        except Exception as e:
++            print(f"Error during ASR: {e}")
++            return None
++
++async def process_dataset(model_name, client, data, concurrent_request):
++    sem = asyncio.Semaphore(concurrent_request)
++    tokenizer = AutoTokenizer.from_pretrained(model_name)
++
++    # Warmup
++    print("Performing warmup...")
++    audio_warmup, sr_warmup = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
++    await bound_asr(sem, client, model_name, tokenizer, (audio_warmup, sr_warmup), "")
++
++    tasks = []
++    print(f"Processing {len(data)} samples...")
++    for sample in data:
++        audio, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
++        tasks.append(asyncio.create_task(
++            bound_asr(sem, client, model_name, tokenizer, (audio, sr), sample["text"])
++        ))
++    
++    results = await asyncio.gather(*tasks)
++    return [r for r in results if r is not None]
++
++def run_evaluation(args):
++    client = AsyncOpenAI(base_url=f"{args.base_url}/v1", api_key="None")
++    
++    print(f"Loading dataset: {args.dataset}...")
++    dataset = load_dataset(args.dataset, split=args.split)
++    
++    # Filter by duration if needed (Whisper max is 30s)
++    def add_duration(sample):
++        y, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
++        sample["duration_ms"] = librosa.get_duration(y=y, sr=sr) * 1000
++        return sample
++
++    if "duration_ms" not in dataset.column_names:
++        dataset = dataset.map(add_duration)
++    
++    dataset = dataset.filter(lambda x: x["duration_ms"] < 30000)
++
++    if args.n_examples > 0:
++        dataset = dataset.select(range(min(args.n_examples, len(dataset))))
++
++    start = time.perf_counter()
++    results = asyncio.run(process_dataset(args.model, client, dataset, args.concurrency))
++    total_test_time = time.perf_counter() - start
++
++    if not results:
++        print("No successful results to evaluate.")
++        return
++
++    # Metrics
++    latencies = [res[0] for res in results]
++    total_tokens = sum([res[1] for res in results])
++    predictions = [res[2] for res in results]
++    references = [res[3] for res in results]
++    
++    wer_metric = load("wer")
++    wer_score = 100 * wer_metric.compute(references=references, predictions=predictions)
++    
++    print("-" * 30)
++    print(f"Results for {args.model}:")
++    print(f"Total Requests: {len(results)}")
++    print(f"WER: {wer_score:.4f}")
++    print(f"Average Latency: {mean(latencies):.4f}s")
++    print(f"Median Latency: {median(latencies):.4f}s")
++    print(f"95th Latency: {sorted(latencies)[int(len(latencies)*0.95)-1]:.4f}s")
++    print(f"Throughput: {len(results) / total_test_time:.2f} req/s")
++    print(f"Token Throughput: {total_tokens / total_test_time:.2f} tok/s")
++    print(f"Total Test Time: {total_test_time:.4f}s")
++    print("-" * 30)
++
++    if args.output:
++        with open(args.output, "w") as f:
++            import json
++            json.dump({
++                "model": args.model,
++                "dataset": args.dataset,
++                "wer": wer_score,
++                "avg_latency": mean(latencies),
++                "throughput": len(results) / total_test_time,
++                "token_throughput": total_tokens / total_test_time,
++            }, f, indent=2)
++
++    if args.show_predictions:
++        print("\n" + "=" * 20 + " Sample Predictions " + "=" * 20)
++        num_to_show = min(args.print_n, len(results))
++        for i in range(num_to_show):
++            print(f"Sample {i+1}:")
++            print(f"  REF: {references[i]}")
++            print(f"  PRED: {predictions[i]}")
++            print("-" * 40)
++        print("=" * 60)
++
++if __name__ == "__main__":
++    parser = argparse.ArgumentParser(description="Benchmark sGLang ASR performance.")
++    parser.add_argument("--base-url", default="http://localhost:30000", help="sGLang server base URL")
++    parser.add_argument("--model", default="openai/whisper-large-v3", help="Model name on the server")
++    parser.add_argument("--dataset", default="D4nt3/esb-datasets-earnings22-validation-tiny-filtered", help="HF dataset repo")
++    parser.add_argument("--split", default="validation", help="Dataset split")
++    parser.add_argument("--concurrency", type=int, default=4, help="Number of concurrent requests")
++    parser.add_argument("--n-examples", type=int, default=-1, help="Number of examples to test (-1 for all)")
++    parser.add_argument("--output", help="Path to save results in JSON")
++    parser.add_argument("--show-predictions", action="store_true", help="Print sample predictions and references")
++    parser.add_argument("--print-n", type=int, default=5, help="Number of sample predictions to print")
++    args = parser.parse_args()
++
++    run_evaluation(args)
+diff --git a/python/sglang/srt/configs/model_config.py b/python/sglang/srt/configs/model_config.py
+index 4d88bf325..ba2baf37c 100644
+--- a/python/sglang/srt/configs/model_config.py
++++ b/python/sglang/srt/configs/model_config.py
+@@ -466,6 +466,15 @@ class ModelConfig:
+         if "IQuestLoopCoderForCausalLM" in self.hf_config.architectures:
+             loop_num = getattr(self.hf_text_config, "loop_num", 1)
+             self.num_attention_layers = int(self.num_hidden_layers * int(loop_num))
++        if "WhisperForConditionalGeneration" in self.hf_config.architectures:
++            # Whisper has unique layer ID scheme:
++            # - Encoder self-attention: 0 to encoder_layers-1 (no KV cache)
++            # - Decoder self-attention: encoder_layers to encoder_layers+decoder_layers-1 (uses KV cache)
++            # - Decoder cross-attention: encoder_layers+decoder_layers to encoder_layers+2*decoder_layers-1
++            # Even though cross-attention doesn't save KV cache, attention backend needs buffer to exist
++            encoder_layers = getattr(self.hf_text_config, "encoder_layers", 0)
++            decoder_layers = getattr(self.hf_text_config, "decoder_layers", self.num_hidden_layers)
++            self.num_attention_layers = encoder_layers + 2 * decoder_layers
+         self.num_nextn_predict_layers = getattr(
+             self.hf_text_config, "num_nextn_predict_layers", None
+         )
+@@ -1078,6 +1087,7 @@ multimodal_model_archs = [
+     "InternVLChatModel",
+     "InternS1ForConditionalGeneration",
+     "Phi4MMForCausalLM",
++    "WhisperForConditionalGeneration",
+     "Step3VLForConditionalGeneration",
+     "POINTSV15ChatModel",
+     "DotsVLMForCausalLM",
+@@ -1114,11 +1124,18 @@ def is_image_gen_model(model_architectures: List[str]):
+ 
+ 
+ def is_audio_model(model_architectures: List[str]):
+-    return False
++    models = [
++        "WhisperForConditionalGeneration",
++    ]
++    return any(model in model_architectures for model in models)
+ 
+ 
+ def is_encoder_decoder_model(model_architectures: List[str]):
+-    return "MllamaForConditionalGeneration" in model_architectures
++    models = [
++        "MllamaForConditionalGeneration",
++        "WhisperForConditionalGeneration",
++    ]
++    return any(model in model_architectures for model in models)
+ 
+ 
+ def is_local_attention_model(model_architectures: List[str]):
+diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
+index a433a0597..6280a03d0 100644
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ -680,9 +680,15 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
+                     "the engine with skip_tokenizer_init=False."
+                 )
+ 
+-            input_ids, token_type_ids = await self._tokenize_texts(
+-                input_text, is_cross_encoder_request
+-            )
++            # For audio-only requests (e.g., Whisper), text may be empty.
++            # The multimodal processor will provide input_ids later.
++            if not input_text and self.mm_processor and obj.contains_mm_input():
++                # Use empty placeholder - multimodal processor will override
++                input_ids = []
++            else:
++                input_ids, token_type_ids = await self._tokenize_texts(
++                    input_text, is_cross_encoder_request
++                )
+ 
+         if self.mm_processor and obj.contains_mm_input():
+             if obj.image_data is not None and not isinstance(obj.image_data, list):
+diff --git a/python/sglang/srt/models/whisper.py b/python/sglang/srt/models/whisper.py
+new file mode 100644
+index 000000000..37716a75d
+--- /dev/null
++++ b/python/sglang/srt/models/whisper.py
+@@ -0,0 +1,592 @@
++from typing import Any, Iterable, List, Optional, Tuple
++
++import torch
++from transformers import WhisperConfig
++
++from sglang.srt.layers.activation import get_act_fn
++from sglang.srt.layers.linear import (
++    ColumnParallelLinear,
++    QKVParallelLinear,
++    RowParallelLinear,
++)
++from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
++from sglang.srt.layers.quantization import QuantizationConfig
++from sglang.srt.layers.radix_attention import AttentionType, RadixAttention
++from sglang.srt.layers.vocab_parallel_embedding import (
++    ParallelLMHead,
++    VocabParallelEmbedding,
++)
++from sglang.srt.distributed import get_tensor_model_parallel_world_size
++from sglang.srt.managers.schedule_batch import MultimodalInputs
++from sglang.srt.model_executor.forward_batch_info import ForwardBatch
++from sglang.srt.model_loader.weight_utils import default_weight_loader
++
++
++class WhisperAttention(torch.nn.Module):
++    """Multi-headed attention from 'Attention Is All You Need' paper"""
++
++    def __init__(
++        self,
++        embed_dim: int,
++        num_heads: int,
++        bias: bool = True,
++        layer_id: Optional[int] = None,
++        quant_config: Optional[QuantizationConfig] = None,
++        is_cross_attention: bool = False,
++        is_encoder=False,
++    ):
++        super().__init__()
++        self.total_num_heads = num_heads
++        head_dim = embed_dim // num_heads
++        self.is_cross_attention = is_cross_attention
++        self.is_encoder = is_encoder
++
++        # Get tensor parallel size for head partitioning
++        tp_size = get_tensor_model_parallel_world_size()
++        assert num_heads % tp_size == 0, f"num_heads ({num_heads}) must be divisible by tp_size ({tp_size})"
++        self.num_heads = num_heads // tp_size  # TP-divided num_heads for RadixAttention
++
++        if (head_dim * num_heads) != embed_dim:
++            raise ValueError(
++                f"embed_dim must be divisible by num_heads (got `embed_dim`: {embed_dim}"
++                f" and `num_heads`: {num_heads})."
++            )
++        self.scaling = head_dim**-0.5
++
++        if is_cross_attention:
++            self.q_proj = ColumnParallelLinear(
++                embed_dim, embed_dim, quant_config=quant_config
++            )
++            self.kv_proj = ColumnParallelLinear(
++                embed_dim, 2 * embed_dim, quant_config=quant_config
++            )
++        else:
++            self.qkv_proj = QKVParallelLinear(
++                embed_dim, head_dim, num_heads, quant_config=quant_config
++            )
++        self.out_proj = RowParallelLinear(
++            embed_dim, embed_dim, bias=bias, quant_config=quant_config
++        )
++        # Pass TP-divided num_heads to RadixAttention
++        self.attn = RadixAttention(
++            self.num_heads,
++            head_dim,
++            scaling=1.0,
++            num_kv_heads=self.num_heads,
++            layer_id=layer_id,
++            quant_config=quant_config,
++            is_cross_attention=is_cross_attention,
++            attn_type=(
++                AttentionType.ENCODER_ONLY if is_encoder else AttentionType.DECODER
++            ),
++        )
++
++    def forward(
++        self,
++        hidden_states: torch.Tensor,
++        forward_batch: ForwardBatch,
++        cross_hidden_states: Optional[torch.Tensor] = None,
++    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
++        """Input shape: Batch x Time x Channel"""
++
++        if self.is_cross_attention:
++            q, _ = self.q_proj(hidden_states)
++            # For cross-attention: compute K,V from encoder outputs
++            # cross_hidden_states should always be provided (from encoder cache)
++            if cross_hidden_states is not None:
++                kv, _ = self.kv_proj(cross_hidden_states)
++                k, v = kv.chunk(chunks=2, dim=-1)
++            else:
++                # Fallback for warmup or missing encoder outputs
++                k = torch.zeros_like(q)
++                v = torch.zeros_like(q)
++
++            # For cross-attention, use PyTorch's scaled_dot_product_attention
++            # which handles numerical precision better
++            num_heads = self.attn.tp_q_head_num
++            head_dim = self.attn.head_dim
++
++            q_len = q.shape[0]
++            kv_len = k.shape[0]
++
++            # Reshape for attention: [seq_len, num_heads, head_dim]
++            q = q.view(q_len, num_heads, head_dim)
++            k = k.view(kv_len, num_heads, head_dim)
++            v = v.view(kv_len, num_heads, head_dim)
++
++            # Transpose to [num_heads, seq_len, head_dim] for batched attention
++            q = q.transpose(0, 1)
++            k = k.transpose(0, 1)
++            v = v.transpose(0, 1)
++
++            # Use PyTorch's efficient SDPA (handles scaling internally)
++            attn_output = torch.nn.functional.scaled_dot_product_attention(
++                q, k, v, scale=self.scaling
++            )
++
++            # Transpose back: [num_heads, q_len, head_dim] -> [q_len, num_heads, head_dim]
++            attn_output = attn_output.transpose(0, 1)
++            attn_output = attn_output.reshape(q_len, num_heads * head_dim)
++        else:
++            qkv, _ = self.qkv_proj(hidden_states)
++            q, k, v = qkv.chunk(chunks=3, dim=-1)
++            # Apply scaling to Q for self-attention
++            q = q * self.scaling
++
++            if self.is_encoder:
++                # For encoder: use direct attention (no KV cache, no RadixAttention)
++                # Encoder hidden_states may have batch dim: [batch, seq_len, embed_dim]
++                num_heads = self.attn.tp_q_head_num
++                head_dim = self.attn.head_dim
++
++                has_batch_dim = hidden_states.ndim == 3
++                if has_batch_dim:
++                    batch_size, seq_len, _ = hidden_states.shape
++                    # Reshape: [batch, seq_len, embed_dim] -> [batch, seq_len, num_heads, head_dim]
++                    q = q.view(batch_size, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)  # [batch, num_heads, seq_len, head_dim]
++                    k = k.view(batch_size, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
++                    v = v.view(batch_size, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
++
++                    # Use PyTorch's scaled_dot_product_attention for efficiency
++                    attn_output = torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=1.0)  # scaling already applied to q
++
++                    # [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, embed_dim]
++                    attn_output = attn_output.permute(0, 2, 1, 3).reshape(batch_size, seq_len, num_heads * head_dim)
++                else:
++                    seq_len = hidden_states.shape[0]
++                    q = q.view(seq_len, num_heads, head_dim).transpose(0, 1)  # [num_heads, seq_len, head_dim]
++                    k = k.view(seq_len, num_heads, head_dim).transpose(0, 1)
++                    v = v.view(seq_len, num_heads, head_dim).transpose(0, 1)
++
++                    attn_weights = torch.bmm(q, k.transpose(1, 2))
++                    attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
++                    attn_output = torch.bmm(attn_weights, v)
++
++                    attn_output = attn_output.transpose(0, 1).reshape(seq_len, num_heads * head_dim)
++            else:
++                # For decoder self-attention: use RadixAttention with KV cache
++                attn_output = self.attn(
++                    q, k, v, forward_batch, save_kv_cache=True
++                )
++
++        attn_output, _ = self.out_proj(attn_output)
++
++        return attn_output
++
++
++class WhisperEncoderLayer(torch.nn.Module):
++    def __init__(
++        self,
++        config: WhisperConfig,
++        layer_id: Optional[int] = None,
++        quant_config: Optional[QuantizationConfig] = None,
++    ):
++        super().__init__()
++        self.embed_dim = config.d_model
++
++        self.self_attn = WhisperAttention(
++            embed_dim=self.embed_dim,
++            num_heads=config.decoder_attention_heads,
++            layer_id=layer_id,
++            quant_config=quant_config,
++            is_encoder=True,
++        )
++        self.self_attn_layer_norm = torch.nn.LayerNorm(self.embed_dim)
++
++        self.activation_fn = get_act_fn(
++            config.activation_function, quant_config=quant_config
++        )
++
++        self.fc1 = ColumnParallelLinear(self.embed_dim, config.encoder_ffn_dim)
++        self.fc2 = RowParallelLinear(config.encoder_ffn_dim, self.embed_dim)
++        self.final_layer_norm = torch.nn.LayerNorm(self.embed_dim)
++
++    def forward(
++        self,
++        hidden_states: torch.Tensor,
++        forward_batch: ForwardBatch,
++    ) -> torch.Tensor:
++
++        residual = hidden_states
++        hidden_states = self.self_attn_layer_norm(hidden_states)
++        hidden_states = self.self_attn(hidden_states, forward_batch)
++
++        hidden_states = residual + hidden_states
++
++        residual = hidden_states
++        hidden_states = self.final_layer_norm(hidden_states)
++        hidden_states, _ = self.fc1(hidden_states)
++        hidden_states = self.activation_fn(hidden_states)
++
++        hidden_states, _ = self.fc2(hidden_states)
++
++        hidden_states = residual + hidden_states
++
++        if hidden_states.dtype == torch.float16:
++            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
++            hidden_states = torch.clamp(
++                hidden_states, min=-clamp_value, max=clamp_value
++            )
++        return hidden_states
++
++
++class WhisperDecoderLayer(torch.nn.Module):
++    def __init__(
++        self,
++        config: WhisperConfig,
++        layer_id: Optional[int] = None,
++        quant_config: Optional[QuantizationConfig] = None,
++    ):
++        super().__init__()
++        self.embed_dim = config.d_model
++
++        # Offset decoder layer IDs to avoid overlap with encoder layers
++        # Encoder uses layer IDs 0 to encoder_layers-1
++        # Decoder self-attention uses encoder_layers to encoder_layers + decoder_layers - 1
++        # Decoder cross-attention uses encoder_layers + decoder_layers to encoder_layers + 2*decoder_layers - 1
++        decoder_self_attn_layer_id = config.encoder_layers + layer_id
++        decoder_cross_attn_layer_id = config.encoder_layers + config.decoder_layers + layer_id
++
++        self.self_attn = WhisperAttention(
++            embed_dim=self.embed_dim,
++            num_heads=config.decoder_attention_heads,
++            layer_id=decoder_self_attn_layer_id,
++            quant_config=quant_config,
++        )
++
++        self.activation_fn = get_act_fn(
++            config.activation_function, quant_config=quant_config
++        )
++
++        self.self_attn_layer_norm = torch.nn.LayerNorm(self.embed_dim)
++        self.encoder_attn = WhisperAttention(
++            embed_dim=self.embed_dim,
++            num_heads=config.decoder_attention_heads,
++            layer_id=decoder_cross_attn_layer_id,
++            quant_config=quant_config,
++            is_cross_attention=True,
++        )
++        self.encoder_attn_layer_norm = torch.nn.LayerNorm(self.embed_dim)
++        self.fc1 = ColumnParallelLinear(self.embed_dim, config.decoder_ffn_dim)
++        self.fc2 = RowParallelLinear(config.decoder_ffn_dim, self.embed_dim)
++        self.final_layer_norm = torch.nn.LayerNorm(self.embed_dim)
++
++    def forward(
++        self,
++        decoder_hidden_states: torch.Tensor,
++        encoder_hidden_states: Optional[torch.Tensor],
++        forward_batch: ForwardBatch,
++    ) -> torch.Tensor:
++
++        residual = decoder_hidden_states
++        decoder_hidden_states = self.self_attn_layer_norm(decoder_hidden_states)
++
++        # Self Attention
++        decoder_hidden_states = self.self_attn(decoder_hidden_states, forward_batch)
++        decoder_hidden_states = residual + decoder_hidden_states
++
++        # Cross-Attention Block
++        residual = decoder_hidden_states
++        decoder_hidden_states = self.encoder_attn_layer_norm(decoder_hidden_states)
++        decoder_hidden_states = self.encoder_attn(
++            decoder_hidden_states, forward_batch, encoder_hidden_states
++        )
++
++        decoder_hidden_states = residual + decoder_hidden_states
++
++        # Fully Connected
++        residual = decoder_hidden_states
++        decoder_hidden_states = self.final_layer_norm(decoder_hidden_states)
++        decoder_hidden_states, _ = self.fc1(decoder_hidden_states)
++        decoder_hidden_states = self.activation_fn(decoder_hidden_states)
++        decoder_hidden_states, _ = self.fc2(decoder_hidden_states)
++
++        decoder_hidden_states = residual + decoder_hidden_states
++
++        return decoder_hidden_states
++
++
++class WhisperEncoder(torch.nn.Module):
++    """
++    Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
++    [`WhisperEncoderLayer`].
++
++    Args:
++        config: WhisperConfig
++    """
++
++    def __init__(
++        self, config: WhisperConfig, quant_config: Optional[QuantizationConfig] = None
++    ):
++        super().__init__()
++
++        embed_dim = config.d_model
++        self.embed_scale = embed_dim**-0.5 if config.scale_embedding else 1.0
++
++        self.conv1 = torch.nn.Conv1d(
++            config.num_mel_bins, embed_dim, kernel_size=3, padding=1
++        )
++        self.conv2 = torch.nn.Conv1d(
++            embed_dim, embed_dim, kernel_size=3, stride=2, padding=1
++        )
++
++        # Use VocabParallelEmbedding with enable_tp=False for positional embeddings
++        # so that every GPU has access to all positions (not sharded)
++        self.embed_positions = VocabParallelEmbedding(
++            config.max_source_positions, embed_dim, enable_tp=False
++        )
++
++        self.layers = torch.nn.ModuleList(
++            [
++                WhisperEncoderLayer(config, id, quant_config)
++                for id in range(config.encoder_layers)
++            ]
++        )
++        self.layer_norm = torch.nn.LayerNorm(config.d_model)
++
++    def forward(
++        self,
++        input_features: torch.Tensor,
++        position_ids: torch.Tensor,
++        forward_batch: ForwardBatch,
++    ):
++        inputs_embeds = torch.nn.functional.gelu(self.conv1(input_features))
++        inputs_embeds = torch.nn.functional.gelu(self.conv2(inputs_embeds))
++
++        inputs_embeds = inputs_embeds.mT
++
++        hidden_states = inputs_embeds + self.embed_positions(position_ids)
++
++        for encoder_layer in self.layers:
++            hidden_states = encoder_layer(hidden_states, forward_batch)
++
++        hidden_states = self.layer_norm(hidden_states)
++        return hidden_states
++
++
++class WhisperDecoder(torch.nn.Module):
++
++    def __init__(
++        self, config: WhisperConfig, quant_config: Optional[QuantizationConfig] = None
++    ):
++        super().__init__()
++        self.max_target_positions = config.max_target_positions
++        self.max_source_positions = config.max_source_positions
++        self.embed_scale = config.d_model**-0.5 if config.scale_embedding else 1.0
++
++        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.d_model)
++        # Use VocabParallelEmbedding with enable_tp=False for positional embeddings
++        # so that every GPU has access to all positions (not sharded)
++        self.embed_positions = VocabParallelEmbedding(
++            self.max_target_positions, config.d_model, enable_tp=False
++        )
++
++        self.layers = torch.nn.ModuleList(
++            [
++                WhisperDecoderLayer(config, layer_idx, quant_config)
++                for layer_idx in range(config.decoder_layers)
++            ]
++        )
++
++        self.layer_norm = torch.nn.LayerNorm(config.d_model)
++
++    def forward(
++        self,
++        input_ids: torch.Tensor,
++        encoder_hidden_states: Optional[torch.Tensor],
++        forward_batch: ForwardBatch,
++        position_ids=None,
++    ):
++
++        inputs_embeds = self.embed_tokens(input_ids)
++
++        # embed positions
++        positions = self.embed_positions(position_ids)
++
++        hidden_states = inputs_embeds + positions.to(inputs_embeds.device)
++
++        for decoder_layer in self.layers:
++            hidden_states = decoder_layer(
++                hidden_states, encoder_hidden_states, forward_batch
++            )
++
++        hidden_states = self.layer_norm(hidden_states)
++
++        return hidden_states
++
++
++class WhisperForConditionalGeneration(torch.nn.Module):
++
++    def __init__(
++        self, config: WhisperConfig, quant_config: Optional[QuantizationConfig] = None
++    ):
++        super().__init__()
++        self.encoder = WhisperEncoder(config, quant_config)
++        self.decoder = WhisperDecoder(config, quant_config)
++        self.proj_out = ParallelLMHead(
++            config.vocab_size, config.d_model, quant_config=quant_config
++        )
++        self.logits_processor = LogitsProcessor(config)
++        self.config = config
++        # Cache encoder outputs per request for use during decode
++        # Key: request_id, Value: encoder_outputs tensor
++        self._encoder_cache = {}
++
++    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
++        stacked_params_mapping = [
++            # (param_name, shard_name, shard_id)
++            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
++            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
++            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
++        ]
++
++        params_dict = dict(self.named_parameters())
++
++        weights_dict = dict(weights)
++        for layer_idx in range(self.config.decoder_layers):
++            layer_prefix = f"model.decoder.layers.{layer_idx}.encoder_attn."
++
++            v_proj_weight = weights_dict[layer_prefix + "v_proj.weight"]
++            v_proj_bias = weights_dict[layer_prefix + "v_proj.bias"]
++
++            k_proj_weight = weights_dict[layer_prefix + "k_proj.weight"]
++
++            del (
++                weights_dict[layer_prefix + "v_proj.weight"],
++                weights_dict[layer_prefix + "v_proj.bias"],
++                weights_dict[layer_prefix + "k_proj.weight"],
++            )
++            k_proj_bias = torch.zeros_like(v_proj_bias)
++
++            weights_dict[f"decoder.layers.{layer_idx}.encoder_attn.kv_proj.weight"] = (
++                torch.cat([k_proj_weight, v_proj_weight], dim=0)
++            )
++            weights_dict[f"decoder.layers.{layer_idx}.encoder_attn.kv_proj.bias"] = (
++                torch.cat([k_proj_bias, v_proj_bias], dim=0)
++            )
++        weights_dict["proj_out.weight"] = weights_dict[
++            "model.decoder.embed_tokens.weight"
++        ]
++
++        for name, loaded_weight in weights_dict.items():
++            name = name.replace("model.", "")
++            for param_name, weight_name, shard_id in stacked_params_mapping:
++                if weight_name not in name:
++                    continue
++                name = name.replace(weight_name, param_name)
++                param = params_dict[name]
++                weight_loader = param.weight_loader
++                weight_loader(param, loaded_weight, shard_id)
++                break
++            else:
++                param = params_dict[name]
++                weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                weight_loader(param, loaded_weight)
++
++    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
++        # For Whisper, we manage encoder outputs at the model level (_encoder_cache)
++        # rather than using the attention backend's encoder cache mechanism.
++        # Therefore, we don't need to prepend placeholder tokens or set num_image_tokens.
++        return input_ids
++
++    def forward(
++        self,
++        input_ids: torch.Tensor,
++        positions: torch.Tensor,
++        forward_batch: ForwardBatch,
++        **kwargs: Any,
++    ) -> LogitsProcessorOutput:
++        from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
++
++        dtype = self.encoder.conv1.weight.dtype
++        device = input_ids.device
++
++        # Check if we're in decode mode - use forward_mode instead of mm_inputs
++        # because mm_inputs can persist across prefill and decode
++        is_decode = forward_batch.forward_mode.is_decode()
++
++        if get_is_capture_mode():
++            # During CUDA graph capture, create dummy encoder outputs
++            total_encoder_len = forward_batch.batch_size
++            encoder_outputs = torch.zeros(
++                total_encoder_len, self.config.d_model, dtype=dtype, device=device
++            )
++        elif is_decode:
++            # Decode phase: retrieve cached encoder outputs for all requests in batch
++            # Each request needs its own encoder outputs for cross-attention
++            encoder_outputs = None
++            if forward_batch.req_pool_indices is not None:
++                req_indices = forward_batch.req_pool_indices.tolist()
++                encoder_list = []
++                for req_idx in req_indices:
++                    if req_idx in self._encoder_cache:
++                        encoder_list.append(self._encoder_cache[req_idx])
++
++                if encoder_list:
++                    if len(encoder_list) == 1:
++                        encoder_outputs = encoder_list[0]
++                    else:
++                        # Concatenate encoder outputs for batched decode
++                        # This aligns with how decoder hidden states are concatenated
++                        encoder_outputs = torch.cat(encoder_list, dim=0)
++        else:
++            # Prefill (extend) phase: process each request's audio separately
++            encoder_list = []
++
++            # Access per-request multimodal inputs instead of merged
++            mm_inputs_list = forward_batch.mm_inputs if forward_batch.mm_inputs else []
++            req_indices = forward_batch.req_pool_indices.tolist() if forward_batch.req_pool_indices is not None else []
++
++            # Process each request's audio separately and cache
++            for i, (req_idx, mm_input) in enumerate(zip(req_indices, mm_inputs_list)):
++                if mm_input is None or not mm_input.mm_items:
++                    continue
++
++                features = mm_input.mm_items[0].feature
++
++                # Add batch dimension if needed
++                if features.ndim == 2:
++                    features = features.unsqueeze(0)
++
++                # Compute encoder output length from features
++                encoder_len = features.shape[-1] // 2
++                encoder_position_ids = torch.arange(encoder_len).to(
++                    features.device, non_blocking=True
++                )
++
++                req_encoder_outputs = self.encoder(
++                    features.to(dtype), encoder_position_ids, forward_batch
++                )
++
++                # Squeeze batch dimension if present
++                if req_encoder_outputs.ndim == 3 and req_encoder_outputs.shape[0] == 1:
++                    req_encoder_outputs = req_encoder_outputs.squeeze(0)
++
++                # Cache this request's encoder outputs
++                self._encoder_cache[req_idx] = req_encoder_outputs
++                encoder_list.append(req_encoder_outputs)
++
++            # Concatenate encoder outputs for all requests in batch
++            if encoder_list:
++                if len(encoder_list) == 1:
++                    encoder_outputs = encoder_list[0]
++                else:
++                    encoder_outputs = torch.cat(encoder_list, dim=0)
++            else:
++                encoder_outputs = None
++
++        decoder_outputs = self.decoder(
++            input_ids, encoder_outputs, forward_batch, positions
++        )
++
++        logits = self.logits_processor(
++            input_ids=input_ids,
++            lm_head=self.proj_out,
++            hidden_states=decoder_outputs,
++            logits_metadata=forward_batch,
++        )
++
++        return logits
++
++
++EntryClass = [WhisperForConditionalGeneration]
+diff --git a/python/sglang/srt/multimodal/processors/whisper.py b/python/sglang/srt/multimodal/processors/whisper.py
+new file mode 100644
+index 000000000..ec6ed5e69
+--- /dev/null
++++ b/python/sglang/srt/multimodal/processors/whisper.py
+@@ -0,0 +1,71 @@
++from typing import Any, Dict, Optional
++
++from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
++from sglang.srt.models.whisper import WhisperForConditionalGeneration
++from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
++from sglang.srt.utils import load_audio
++
++
++class WhisperProcessor(BaseMultimodalProcessor):
++    models = [WhisperForConditionalGeneration]
++
++    def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
++        super().__init__(hf_config, server_args, _processor, *args, **kwargs)
++
++    async def process_mm_data_async(
++        self,
++        image_data,
++        audio_data,
++        input_text,
++        request_obj,
++        **kwargs,
++    ) -> Optional[Dict[str, Any]]:
++        if not audio_data:
++            return None
++
++        audios = [load_audio(audio) for audio in audio_data]
++        assert len(audios) == 1
++
++        # For Whisper, ALWAYS use the proper transcription token sequence
++        # and IGNORE any text prompt - Whisper is a pure speech-to-text model
++        # The decoder_start_token_id and forced_decoder_ids from generation config
++        # set up: <|startoftranscript|> <|lang|> <|task|> [<|notimestamps|>]
++
++        # Get decoder start tokens from generation config or use defaults
++        # Default: <|startoftranscript|>(50258) + <|en|>(50259) + <|transcribe|>(50360) + <|notimestamps|>(50364)
++        decoder_start_token_id = getattr(
++            self.hf_config, "decoder_start_token_id", 50258
++        )
++
++        # Try to get forced_decoder_ids from config
++        forced_decoder_ids = getattr(self.hf_config, "forced_decoder_ids", None)
++        if forced_decoder_ids:
++            # forced_decoder_ids is list of [position, token_id]
++            input_ids = [decoder_start_token_id]
++            for _, token_id in forced_decoder_ids:
++                if token_id is not None:
++                    input_ids.append(token_id)
++        else:
++            # Default transcription tokens for English
++            # <|startoftranscript|> <|en|> <|transcribe|> <|notimestamps|>
++            input_ids = [50258, 50259, 50360, 50364]
++
++        # Whisper expects input features padded to max_length (3000 frames = 30 seconds)
++        # This is the standard context length for Whisper
++        input_features = self._processor.feature_extractor(
++            audios[0],
++            sampling_rate=16000,
++            padding="max_length",  # Pad to 3000 frames
++            return_tensors="pt",
++        )["input_features"][0]
++
++        output = {}
++        output["input_ids"] = input_ids
++        output["mm_items"] = [
++            MultimodalDataItem(
++                feature=input_features,
++                modality=Modality.AUDIO,
++            )
++        ]
++
++        return output
+diff --git a/python/sglang/srt/parser/conversation.py b/python/sglang/srt/parser/conversation.py
+index 8a639b645..954cb168b 100644
+--- a/python/sglang/srt/parser/conversation.py
++++ b/python/sglang/srt/parser/conversation.py
+@@ -1027,6 +1027,23 @@ register_conv_template(
+     )
+ )
+ 
++# Whisper speech-to-text template
++# Whisper uses special tokens: <|startoftranscript|>, <|en|>, <|transcribe|>, etc.
++# Audio features are processed by encoder separately, not inserted into text
++# The decoder start tokens (task, language) should be set via generation config
++register_conv_template(
++    Conversation(
++        name="whisper",
++        system_template="",
++        system_message="",
++        roles=("", ""),
++        sep_style=SeparatorStyle.NO_COLON_SINGLE,
++        sep="",
++        stop_str=["<|endoftext|>"],
++        audio_token="",  # Empty - audio is handled by encoder, not as text token
++    )
++)
++
+ MODEL_TYPE_TO_TEMPLATE = {
+     "internvl_chat": "internvl-2-5",
+     "deepseek_vl_v2": "deepseek-vl2",
+@@ -1036,6 +1053,7 @@ MODEL_TYPE_TO_TEMPLATE = {
+     "minicpmo": "minicpmo",
+     "deepseek-ocr": "deepseek-ocr",
+     "paddleocr_vl": "paddle-ocr",
++    "whisper": "whisper",
+ }
+ 
+ 
+@@ -1129,3 +1147,11 @@ def match_paddle_ocr(model_path: str):
+         return "paddle-ocr"
+     model_type = get_model_type(model_path)
+     return MODEL_TYPE_TO_TEMPLATE.get(model_type)
++
++
++@register_conv_template_matching_function
++def match_whisper(model_path: str):
++    if "whisper" in model_path.lower():
++        return "whisper"
++    model_type = get_model_type(model_path)
++    return MODEL_TYPE_TO_TEMPLATE.get(model_type)
+-- 
+2.52.0
+
