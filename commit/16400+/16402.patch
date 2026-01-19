@@ -1,0 +1,157 @@
+From 8f0754071cd2ddcca73989d948f3edfef973b78d Mon Sep 17 00:00:00 2001
+From: GitHub Action <action@github.com>
+Date: Mon, 19 Jan 2026 10:24:36 +0000
+Subject: [PATCH] feat: Squash PR #16402 changes
+
+---
+ python/sglang/srt/managers/mm_utils.py        | 79 +++++++++++++++++++
+ python/sglang/srt/managers/scheduler.py       |  3 +-
+ .../sglang/srt/managers/tokenizer_manager.py  |  3 +-
+ 3 files changed, 83 insertions(+), 2 deletions(-)
+
+diff --git a/python/sglang/srt/managers/mm_utils.py b/python/sglang/srt/managers/mm_utils.py
+index 1e4d09036..7683c75a0 100644
+--- a/python/sglang/srt/managers/mm_utils.py
++++ b/python/sglang/srt/managers/mm_utils.py
+@@ -7,6 +7,7 @@ import hashlib
+ import pickle
+ from abc import abstractmethod
+ from collections import defaultdict
++from multiprocessing import shared_memory
+ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+ 
+ import numpy as np
+@@ -21,6 +22,7 @@ from sglang.srt.managers.schedule_batch import (
+     MultimodalDataItem,
+     MultimodalInputs,
+ )
++from sglang.srt.managers.tokenizer_manager import _determine_tensor_transport_mode
+ from sglang.srt.mem_cache.multimodal_cache import EmbeddingResult, MultiModalStaticCache
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+ from sglang.srt.multimodal.evs import EVSEmbeddingResult
+@@ -1485,3 +1487,80 @@ def get_new_expanded_mm_items(original_mm_items):
+         else:
+             expanded_mm_items.append(item)
+     return expanded_mm_items
++
++
++class ShmPointerMMData:
++    """
++    Wraps a tensor to be sent via a shared memory handle.
++    This acts as a "pointer" to the tensor data across process boundaries.
++    """
++
++    def __init__(self, tensor: torch.Tensor):
++        self.cpu_tensor = tensor.cpu().contiguous()
++        self.shape = self.cpu_tensor.shape
++        self.dtype = self.cpu_tensor.dtype
++
++        nbytes = self.cpu_tensor.numel() * self.cpu_tensor.element_size()
++
++        self.shm = shared_memory.SharedMemory(create=True, size=nbytes)
++
++        try:
++            shm_view = np.ndarray((nbytes,), dtype=np.uint8, buffer=self.shm.buf)
++
++            shm_view[:] = self.cpu_tensor.view(torch.uint8).numpy().flatten()
++        finally:
++            self.shm.close()
++
++    def __getstate__(self):
++        return {
++            "shm_name": self.shm.name,
++            "shape": self.shape,
++            "dtype": self.dtype,
++        }
++
++    def __setstate__(self, state):
++        self.shm_name = state["shm_name"]
++
++        shm_handle = shared_memory.SharedMemory(name=self.shm_name)
++        try:
++            self.tensor = (
++                torch.frombuffer(shm_handle.buf, dtype=state["dtype"])
++                .reshape(state["shape"])
++                .clone()
++            )
++        finally:
++            shm_handle.close()
++            shm_handle.unlink()
++
++
++def wrap_shm_features(obj):
++    """
++    Scan the object for multimodal tensors and wrap them in SHM pointers.
++    """
++    if _determine_tensor_transport_mode(get_global_server_args()) == "default":
++        return obj
++
++    if hasattr(obj, "mm_inputs") and obj.mm_inputs:
++        mm_items = obj.mm_inputs.get("mm_items", [])
++        for item in mm_items:
++            if (
++                hasattr(item, "feature")
++                and isinstance(item.feature, torch.Tensor)
++                and item.feature.is_cpu
++            ):
++                item.feature = ShmPointerMMData(item.feature)
++    return obj
++
++
++def unwrap_shm_features(obj):
++    """
++    Restore ShmPointerMMData wrappers back into standard torch.Tensors.
++    """
++    if _determine_tensor_transport_mode(get_global_server_args()) == "default":
++        return obj
++    if hasattr(obj, "mm_inputs") and obj.mm_inputs:
++        mm_items = obj.mm_inputs.get("mm_items", [])
++        for item in mm_items:
++            if isinstance(item.feature, ShmPointerMMData):
++                item.feature = item.feature.tensor
++    return obj
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index 1bf294973..e9a0681c0 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -119,7 +119,7 @@ from sglang.srt.managers.io_struct import (
+     UpdateWeightsFromIPCReqInput,
+     UpdateWeightsFromTensorReqInput,
+ )
+-from sglang.srt.managers.mm_utils import init_mm_embedding_cache
++from sglang.srt.managers.mm_utils import init_mm_embedding_cache, unwrap_shm_features
+ from sglang.srt.managers.overlap_utils import FutureMap
+ from sglang.srt.managers.prefill_delayer import (
+     PrefillDelayer,
+@@ -1182,6 +1182,7 @@ class Scheduler(
+                         if self.recv_limit_reached(len(recv_reqs)):
+                             break
+                         recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
++                        recv_req = unwrap_shm_features(recv_req)
+                     except zmq.ZMQError:
+                         break
+                     recv_reqs.append(recv_req)
+diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
+index a3c5001e8..52b32f19b 100644
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ -69,7 +69,7 @@ from sglang.srt.managers.io_struct import (
+     UpdateWeightFromDiskReqOutput,
+     WatchLoadUpdateReq,
+ )
+-from sglang.srt.managers.mm_utils import TensorTransportMode
++from sglang.srt.managers.mm_utils import TensorTransportMode, wrap_shm_features
+ from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
+ from sglang.srt.managers.request_metrics_exporter import RequestMetricsExporterManager
+ from sglang.srt.managers.schedule_batch import MultimodalDataItem, RequestStage
+@@ -1055,6 +1055,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
+     ):
+         trace_slice_start(RequestStage.TOKENIZER_DISPATCH, obj.rid)
+         tokenized_obj.trace_context = trace_get_proc_propagate_context(obj.rid)
++        tokenized_obj = wrap_shm_features(tokenized_obj)
+         self.send_to_scheduler.send_pyobj(tokenized_obj)
+         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
+         state.request_sent_to_scheduler_ts = time.time()
+-- 
+2.52.0
+
