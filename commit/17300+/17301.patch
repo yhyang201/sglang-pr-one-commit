@@ -1,15 +1,15 @@
-From 03e4f19eacc73f23ccd658cce5e43e48abdd90ed Mon Sep 17 00:00:00 2001
+From 86452cf27a2d2c108bc10088abdf37329810918e Mon Sep 17 00:00:00 2001
 From: GitHub Action <action@github.com>
-Date: Sun, 18 Jan 2026 15:58:02 +0000
+Date: Fri, 23 Jan 2026 14:30:39 +0000
 Subject: [PATCH] feat: Squash PR #17301 changes
 
 ---
- .../configs/pipeline_configs/zimage.py        | 189 ++++++++++++++++--
+ .../configs/pipeline_configs/zimage.py        | 195 ++++++++++++++++--
  .../pipelines_core/stages/denoising.py        |   3 +
- 2 files changed, 177 insertions(+), 15 deletions(-)
+ 2 files changed, 180 insertions(+), 18 deletions(-)
 
 diff --git a/python/sglang/multimodal_gen/configs/pipeline_configs/zimage.py b/python/sglang/multimodal_gen/configs/pipeline_configs/zimage.py
-index 68f00a667..f02662b33 100644
+index 68f00a667..b851c27c8 100644
 --- a/python/sglang/multimodal_gen/configs/pipeline_configs/zimage.py
 +++ b/python/sglang/multimodal_gen/configs/pipeline_configs/zimage.py
 @@ -1,4 +1,5 @@
@@ -33,17 +33,34 @@ index 68f00a667..f02662b33 100644
  )
  
  
-@@ -54,6 +61,9 @@ class ZImagePipelineConfig(ImagePipelineConfig):
+@@ -37,10 +44,8 @@ class TransformersModelConfig(EncoderConfig):
+ 
+ @dataclass
+ class ZImagePipelineConfig(ImagePipelineConfig):
+-
+     should_use_guidance: bool = False
+     task_type: ModelTaskType = ModelTaskType.T2I
+-
+     dit_config: DiTConfig = field(default_factory=ZImageDitConfig)
+     vae_config: VAEConfig = field(default_factory=FluxVAEConfig)
+     text_encoder_configs: tuple[EncoderConfig, ...] = field(
+@@ -50,11 +55,14 @@ class ZImagePipelineConfig(ImagePipelineConfig):
+     preprocess_text_funcs: tuple[Callable, ...] = field(
+         default_factory=lambda: (zimage_preprocess_text,)
+     )
+-
      postprocess_text_funcs: tuple[Callable, ...] = field(
          default_factory=lambda: (zimage_postprocess_text,)
      )
-+    SEQ_LEN_MULTIPLE = 32
-+    PATCH_SIZE = 2
-+    F_PATCH_SIZE = 1
  
++    SEQ_LEN_MULTIPLE: int = 32
++    PATCH_SIZE: int = 2
++    F_PATCH_SIZE: int = 1
++
      def tokenize_prompt(self, prompts: list[str], tokenizer, tok_kwargs) -> dict:
          # flatten to 1-d list
-@@ -70,19 +80,139 @@ class ZImagePipelineConfig(ImagePipelineConfig):
+         inputs = tokenizer.apply_chat_template(
+@@ -70,19 +78,141 @@ class ZImagePipelineConfig(ImagePipelineConfig):
          )
          return inputs
  
@@ -71,11 +88,12 @@ index 68f00a667..f02662b33 100644
 +            )
 +
 +        # Rule: shard along the larger spatial dimension (W/H), implemented via optional H/W transpose.
-+        # To select the larger of H and W for sharding, therefore H_eff = max(H, W).
++        # Choose the larger of H and W for sharding, so H_eff = max(H, W).
 +        swap_hw = W > H
 +        H_eff = W if swap_hw else H
 +        W_eff = H if swap_hw else W
 +
++        # ZImage uses PATCH_SIZE=2 for spatial patchify; shard in token space and convert back to latent rows.
 +        H_tok = H_eff // self.PATCH_SIZE
 +        W_tok = W_eff // self.PATCH_SIZE
 +        H_tok_pad = self._ceil_to_multiple(H_tok, sp_size)
@@ -155,16 +173,17 @@ index 68f00a667..f02662b33 100644
 +
 +        # Pad on effective-H so that H_tok is divisible by sp.
 +        H_eff = latents.size(3)
-+        H_tok = H_eff // 2
++
++        H_tok = H_eff // self.PATCH_SIZE
 +        pad_tok = plan["H_tok_pad"] - H_tok
-+        pad_lat = pad_tok * 2
++        pad_lat = pad_tok * self.PATCH_SIZE
 +        if pad_lat > 0:
 +            pad = latents[:, :, :, -1:, :].repeat(1, 1, 1, pad_lat, 1)
 +            latents = torch.cat([latents, pad], dim=3)
-+
-+        h0 = plan["h0_tok"] * 2
-+        h1 = (plan["h0_tok"] + plan["H_tok_local"]) * 2
++        h0 = plan["h0_tok"] * self.PATCH_SIZE
++        h1 = (plan["h0_tok"] + plan["H_tok_local"]) * self.PATCH_SIZE
 +        latents = latents[:, :, :, h0:h1, :]
++
 +        batch._zimage_sp_swap_hw = plan["swap_hw"]
 +        return latents, True
  
@@ -252,10 +271,10 @@ index 68f00a667..f02662b33 100644
          image_ori_pos_ids = create_coordinate_grid(
              size=(F_tokens, H_tokens, W_tokens),
 diff --git a/python/sglang/multimodal_gen/runtime/pipelines_core/stages/denoising.py b/python/sglang/multimodal_gen/runtime/pipelines_core/stages/denoising.py
-index dd0a721b4..eda0a4be6 100644
+index d4bd11387..ea8f681e5 100644
 --- a/python/sglang/multimodal_gen/runtime/pipelines_core/stages/denoising.py
 +++ b/python/sglang/multimodal_gen/runtime/pipelines_core/stages/denoising.py
-@@ -1018,6 +1018,9 @@ class DenoisingStage(PipelineStage):
+@@ -1017,6 +1017,9 @@ class DenoisingStage(PipelineStage):
  
                          # Predict noise residual
                          attn_metadata = self._build_attn_metadata(i, batch, server_args)
